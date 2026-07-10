@@ -1,7 +1,7 @@
 //! HTTP API 模块 — 调用 AMAX 后端接口
 
 use chrono::Local;
-use reqwest::header::{HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{ACCEPT, ACCEPT_ENCODING, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -91,6 +91,8 @@ pub struct DashboardData {
 pub fn build_client() -> Result<reqwest::Client, String> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static("Mozilla/5.0"));
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
     headers.insert("x-company", HeaderValue::from_static("AMAX"));
 
     reqwest::Client::builder()
@@ -179,10 +181,30 @@ pub async fn fetch_dashboard(
             break;
         }
 
-        let logs_response = match response.json::<LogsPayload>().await {
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("未知")
+            .to_string();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!(
+                    "读取日志响应失败，保留账户额度数据: status={status}, content-type={content_type}, error={error}"
+                );
+                logs_available = false;
+                break;
+            }
+        };
+        let logs_response = match serde_json::from_slice::<LogsPayload>(&bytes) {
             Ok(payload) => payload.into_response(),
             Err(error) => {
-                eprintln!("日志响应解析失败，保留账户额度数据: {error}");
+                let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
+                eprintln!(
+                    "日志 JSON 解析失败，保留账户额度数据: status={status}, content-type={content_type}, body={preview:?}, error={error}"
+                );
                 logs_available = false;
                 break;
             }
