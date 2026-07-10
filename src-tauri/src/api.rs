@@ -24,10 +24,14 @@ struct UserInfo {
 
 #[derive(Deserialize)]
 struct LogEntry {
-    quota: f64,
-    total_tokens: i64,
-    input_tokens: i64,
-    output_tokens: i64,
+    #[serde(default)]
+    quota: Option<f64>,
+    #[serde(default)]
+    total_tokens: Option<i64>,
+    #[serde(default)]
+    input_tokens: Option<i64>,
+    #[serde(default)]
+    output_tokens: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -63,10 +67,10 @@ struct LogSummary {
 
 impl LogSummary {
     fn add(&mut self, entry: LogEntry) {
-        self.quota += entry.quota;
-        self.total_tokens += entry.total_tokens;
-        self.input_tokens += entry.input_tokens;
-        self.output_tokens += entry.output_tokens;
+        self.quota += entry.quota.unwrap_or_default();
+        self.total_tokens += entry.total_tokens.unwrap_or_default();
+        self.input_tokens += entry.input_tokens.unwrap_or_default();
+        self.output_tokens += entry.output_tokens.unwrap_or_default();
         self.count += 1;
     }
 }
@@ -255,6 +259,30 @@ mod tests {
         let payload: LogsPayload =
             serde_json::from_str(r#"{"total_pages":0,"data":[]}"#).expect("应解析直接日志响应");
         assert_empty_response(payload.into_response());
+    }
+
+    #[test]
+    fn parses_real_logs_response_shape() {
+        let payload: LogsPayload = serde_json::from_str(
+            r#"{
+                "total": 235,
+                "page": 1,
+                "page_size": 100,
+                "total_pages": 3,
+                "data": [{
+                    "id": "563730da-1467-498b-a1dd-b9867737888b",
+                    "request_id": "request-id",
+                    "quota": null,
+                    "total_tokens": null,
+                    "input_tokens": 120,
+                    "output_tokens": 30
+                }]
+            }"#,
+        )
+        .expect("应解析包含空统计字段的真实日志响应");
+        let response = payload.into_response();
+        assert_eq!(response.total_pages, 3);
+        assert_eq!(response.data.len(), 1);
     }
 
     #[test]
