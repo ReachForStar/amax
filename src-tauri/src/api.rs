@@ -1,12 +1,11 @@
 //! HTTP API 模块 — 调用 AMAX 后端接口
 
-use chrono::Local;
+use chrono::{Datelike, Local, TimeZone};
 use reqwest::header::{ACCEPT, ACCEPT_ENCODING, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 const BASE_URL: &str = "https://ai.amaxsmp.com";
-const MAX_LOG_PAGES: i64 = 100;
 pub const QUOTA_PER_YUAN: f64 = 500_000.0;
 
 #[derive(Deserialize)]
@@ -22,57 +21,17 @@ struct UserInfo {
     display_name: String,
 }
 
-#[derive(Deserialize)]
-struct LogEntry {
-    #[serde(default)]
-    quota: Option<f64>,
-    #[serde(default)]
-    total_tokens: Option<i64>,
-    #[serde(default)]
-    input_tokens: Option<i64>,
-    #[serde(default)]
-    output_tokens: Option<i64>,
-}
-
-#[derive(Deserialize)]
-struct LogsResponse {
-    total_pages: i64,
-    data: Vec<LogEntry>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum LogsPayload {
-    Direct(LogsResponse),
-    Enveloped(ApiEnvelope<LogsResponse>),
-}
-
-impl LogsPayload {
-    fn into_response(self) -> LogsResponse {
-        match self {
-            Self::Direct(response) => response,
-            Self::Enveloped(envelope) => envelope.data,
-        }
-    }
-}
-
-#[derive(Default)]
-struct LogSummary {
+#[derive(Debug, Default, Deserialize)]
+struct UsageSummary {
     quota: f64,
     total_tokens: i64,
     input_tokens: i64,
     output_tokens: i64,
-    count: usize,
 }
 
-impl LogSummary {
-    fn add(&mut self, entry: LogEntry) {
-        self.quota += entry.quota.unwrap_or_default();
-        self.total_tokens += entry.total_tokens.unwrap_or_default();
-        self.input_tokens += entry.input_tokens.unwrap_or_default();
-        self.output_tokens += entry.output_tokens.unwrap_or_default();
-        self.count += 1;
-    }
+#[derive(Deserialize)]
+struct UsageResponse {
+    summary: UsageSummary,
 }
 
 /// 看板汇总数据 (可序列化, 返回给前端)
@@ -84,7 +43,7 @@ pub struct DashboardData {
     pub today_tokens: i64,
     pub today_input: i64,
     pub today_output: i64,
-    pub log_count: usize,
+    pub log_count: Option<usize>,
     pub remaining: f64,
     pub used: f64,
     pub total: f64,
@@ -111,13 +70,22 @@ pub fn build_client() -> Result<reqwest::Client, String> {
 pub async fn fetch_dashboard(
     client: &reqwest::Client,
     cookie: &str,
-    api_key: Option<&str>,
 ) -> Result<DashboardData, String> {
     if cookie.is_empty() {
         return Err("认证失败: 未配置 Cookie".into());
     }
 
-    let today = Local::now().format("%Y-%m-%d").to_string();
+    let now = Local::now();
+    let start_time = Local
+        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+        .single()
+        .ok_or_else(|| "无法计算本地日期起点".to_string())?
+        .timestamp();
+    let end_time = Local
+        .with_ymd_and_hms(now.year(), now.month(), now.day(), 23, 59, 59)
+        .single()
+        .ok_or_else(|| "无法计算本地日期终点".to_string())?
+        .timestamp();
     let response = client
         .get(format!("{BASE_URL}/api/user/self"))
         .header("Cookie", cookie)
@@ -150,85 +118,53 @@ pub async fn fetch_dashboard(
         0.0
     };
 
-    let mut summary = LogSummary::default();
-    let mut logs_available = true;
-    let mut page = 1;
-    loop {
-        let url = format!(
-            "{BASE_URL}/v1/logs?page={page}&page_size=1000&start_time={today}&end_time={today}"
-        );
-        let body = match api_key {
-            Some(key) => serde_json::json!({ "api_keys": [key] }),
-            None => serde_json::json!({}),
-        };
-        let response = match client
-            .post(url)
-            .header("Cookie", cookie)
-            .json(&body)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                eprintln!("日志查询失败，保留账户额度数据: {error}");
-                logs_available = false;
-                break;
-            }
-        };
+    let mut summary = UsageSummary::default();
+    let mut logs_available = false;
+    let response = client
+        .post(format!("{BASE_URL}/v1/logs/token-usage/by-model"))
+        .header("Cookie", cookie)
+        .json(&serde_json::json!({
+            "start_time": start_time,
+            "end_time": end_time,
+            "status": "success",
+        }))
+        .send()
+        .await;
 
-        if !response.status().is_success() {
-            eprintln!(
-                "日志查询返回异常状态，保留账户额度数据: {}",
-                response.status()
-            );
-            logs_available = false;
-            break;
-        }
-
-        let status = response.status();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("未知")
-            .to_string();
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!(
-                    "读取日志响应失败，保留账户额度数据: status={status}, content-type={content_type}, error={error}"
-                );
-                logs_available = false;
-                break;
+    match response {
+        Ok(response) if response.status().is_success() => {
+            let status = response.status();
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("未知")
+                .to_string();
+            match response.bytes().await {
+                Ok(bytes) => match serde_json::from_slice::<UsageResponse>(&bytes) {
+                    Ok(payload) => {
+                        summary = payload.summary;
+                        logs_available = true;
+                    }
+                    Err(error) => {
+                        let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
+                        eprintln!(
+                            "日志汇总 JSON 解析失败，保留账户额度数据: status={status}, content-type={content_type}, body={preview:?}, error={error}"
+                        );
+                    }
+                },
+                Err(error) => eprintln!(
+                    "读取日志汇总响应失败，保留账户额度数据: status={status}, content-type={content_type}, error={error}"
+                ),
             }
-        };
-        let logs_response = match serde_json::from_slice::<LogsPayload>(&bytes) {
-            Ok(payload) => payload.into_response(),
-            Err(error) => {
-                let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
-                eprintln!(
-                    "日志 JSON 解析失败，保留账户额度数据: status={status}, content-type={content_type}, body={preview:?}, error={error}"
-                );
-                logs_available = false;
-                break;
-            }
-        };
-        if !(0..=MAX_LOG_PAGES).contains(&logs_response.total_pages) {
-            eprintln!(
-                "日志分页数据异常，保留账户额度数据: {}",
-                logs_response.total_pages
-            );
-            logs_available = false;
-            break;
         }
-        for entry in logs_response.data {
-            summary.add(entry);
-        }
-        if page >= logs_response.total_pages || logs_response.total_pages == 0 {
-            break;
-        }
-        page += 1;
+        Ok(response) => eprintln!(
+            "日志汇总查询返回异常状态，保留账户额度数据: {}",
+            response.status()
+        ),
+        Err(error) => eprintln!("日志汇总查询失败，保留账户额度数据: {error}"),
     }
+
     Ok(DashboardData {
         display_name: user.display_name,
         request_count: user.request_count,
@@ -236,7 +172,7 @@ pub async fn fetch_dashboard(
         today_tokens: summary.total_tokens,
         today_input: summary.input_tokens,
         today_output: summary.output_tokens,
-        log_count: summary.count,
+        log_count: None,
         remaining,
         used,
         total,
@@ -247,48 +183,26 @@ pub async fn fetch_dashboard(
 
 #[cfg(test)]
 mod tests {
-    use super::{LogsPayload, LogsResponse};
-
-    fn assert_empty_response(response: LogsResponse) {
-        assert_eq!(response.total_pages, 0);
-        assert!(response.data.is_empty());
-    }
+    use super::{QUOTA_PER_YUAN, UsageResponse};
 
     #[test]
-    fn parses_direct_logs_response() {
-        let payload: LogsPayload =
-            serde_json::from_str(r#"{"total_pages":0,"data":[]}"#).expect("应解析直接日志响应");
-        assert_empty_response(payload.into_response());
-    }
-
-    #[test]
-    fn parses_real_logs_response_shape() {
-        let payload: LogsPayload = serde_json::from_str(
+    fn parses_usage_summary() {
+        let payload: UsageResponse = serde_json::from_str(
             r#"{
-                "total": 235,
-                "page": 1,
-                "page_size": 100,
-                "total_pages": 3,
-                "data": [{
-                    "id": "563730da-1467-498b-a1dd-b9867737888b",
-                    "request_id": "request-id",
-                    "quota": null,
-                    "total_tokens": null,
-                    "input_tokens": 120,
-                    "output_tokens": 30
-                }]
+                "summary": {
+                    "input_tokens": 25989178,
+                    "output_tokens": 83375,
+                    "completion_tokens": 83375,
+                    "total_tokens": 26072553,
+                    "quota": 7006999.0
+                }
             }"#,
         )
-        .expect("应解析包含空统计字段的真实日志响应");
-        let response = payload.into_response();
-        assert_eq!(response.total_pages, 3);
-        assert_eq!(response.data.len(), 1);
-    }
+        .expect("应解析官网日志汇总响应");
 
-    #[test]
-    fn parses_enveloped_logs_response() {
-        let payload: LogsPayload = serde_json::from_str(r#"{"data":{"total_pages":0,"data":[]}}"#)
-            .expect("应解析带信封的日志响应");
-        assert_empty_response(payload.into_response());
+        assert_eq!(payload.summary.input_tokens, 25_989_178);
+        assert_eq!(payload.summary.output_tokens, 83_375);
+        assert_eq!(payload.summary.total_tokens, 26_072_553);
+        assert!((payload.summary.quota / QUOTA_PER_YUAN - 14.013998).abs() < 1e-9);
     }
 }

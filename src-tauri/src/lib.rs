@@ -90,19 +90,14 @@ async fn refresh_dashboard(
 ) -> Result<api::DashboardData, String> {
     let state = app.state::<AppState>();
     let _refresh_guard = state.refresh_lock.lock().await;
-    let (cookie, api_key) = {
+    let cookie = {
         let db = state
             .db
             .lock()
             .map_err(|_| "数据库状态锁已损坏".to_string())?;
-        (db.get_cookie().unwrap_or_default(), db.get_api_key())
+        db.get_cookie().unwrap_or_default()
     };
-    let data = api::fetch_dashboard(
-        &state.client,
-        &cookie,
-        api_key.as_deref().filter(|key| !key.is_empty()),
-    )
-    .await?;
+    let data = api::fetch_dashboard(&state.client, &cookie).await?;
 
     {
         let db = state

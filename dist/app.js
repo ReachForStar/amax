@@ -167,7 +167,9 @@ function renderDashboard(d) {
   $('#user-name').textContent = '👋 你好, ' + d.display_name;
   $('#user-requests').textContent = '累计请求: ' + d.request_count.toLocaleString();
   $('#today-yuan').textContent = d.logs_available ? '¥' + d.today_yuan.toFixed(6) : '暂不可用';
-  $('#log-count').textContent = d.logs_available ? d.log_count + ' 次请求' : '日志接口暂不可用';
+  $('#log-count').textContent = d.logs_available
+    ? (d.log_count == null ? '成功请求汇总' : d.log_count + ' 次请求')
+    : '日志接口暂不可用';
   $('#today-tokens').textContent = d.logs_available ? formatTokens(d.today_tokens) + ' tokens' : '暂不可用';
   $('#token-detail').textContent = d.logs_available
     ? '入 ' + formatTokens(d.today_input) + ' / 出 ' + formatTokens(d.today_output)
