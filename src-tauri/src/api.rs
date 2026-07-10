@@ -15,6 +15,7 @@ struct ApiEnvelope<T> {
 
 #[derive(Deserialize)]
 struct UserInfo {
+    id: i64,
     quota: i64,
     used_quota: i64,
     request_count: i64,
@@ -126,6 +127,7 @@ pub async fn fetch_dashboard(
         .json(&serde_json::json!({
             "start_time": start_time,
             "end_time": end_time,
+            "user_id": user.id.to_string(),
             "status": "success",
         }))
         .send()
@@ -158,10 +160,17 @@ pub async fn fetch_dashboard(
                 ),
             }
         }
-        Ok(response) => eprintln!(
-            "日志汇总查询返回异常状态，保留账户额度数据: {}",
-            response.status()
-        ),
+        Ok(response) => {
+            let status = response.status();
+            let detail = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("无法读取错误响应: {error}"));
+            let preview: String = detail.chars().take(512).collect();
+            eprintln!(
+                "日志汇总查询返回异常状态，保留账户额度数据: status={status}, body={preview:?}"
+            );
+        }
         Err(error) => eprintln!("日志汇总查询失败，保留账户额度数据: {error}"),
     }
 
