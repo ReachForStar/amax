@@ -32,6 +32,7 @@ let hasDashboardData = false;
 let hasSavedCookie = false;
 let lastUpdatedAt = null;
 let updateTimeTimer = null;
+let dashboardRequest = null;
 
 // ═══ 工具 ═══
 function formatTokens(n) {
@@ -109,6 +110,7 @@ saveBtn.addEventListener('click', async () => {
 
   try {
     await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
+    if (cookie) hasSavedCookie = true;
     await loadDashboard();
   } catch (e) {
     saveBtn.disabled = false;
@@ -119,30 +121,40 @@ saveBtn.addEventListener('click', async () => {
 
 // ═══ 看板 ═══
 async function loadDashboard() {
-  showScreen('dashboard');
-  if (!hasDashboardData) showSkeleton();
-  errorEl.classList.add('hidden');
-  const refreshBtn = $('#refresh-btn');
-  refreshBtn.classList.add('is-loading');
-  refreshBtn.disabled = true;
+  if (dashboardRequest) return dashboardRequest;
+
+  dashboardRequest = (async () => {
+    showScreen('dashboard');
+    if (!hasDashboardData) showSkeleton();
+    errorEl.classList.add('hidden');
+    const refreshBtn = $('#refresh-btn');
+    refreshBtn.classList.add('is-loading');
+    refreshBtn.disabled = true;
+
+    try {
+      const data = await invoke('fetch_dashboard');
+      renderDashboard(data);
+    } catch (e) {
+      const msg = typeof e === 'string' ? e : (e?.message || e?.toString?.() || '未知错误');
+      if (msg.includes('401') || msg.includes('认证失败')) {
+        showScreen('config');
+        showConfigError('Cookie 无效或已过期, 请重新获取');
+        saveBtn.disabled = false;
+      } else if (msg.includes('网络') || msg.includes('timeout') || msg.includes('connect')) {
+        showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '网络连接失败：') + msg);
+      } else {
+        showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '获取数据失败：') + msg);
+      }
+    } finally {
+      refreshBtn.classList.remove('is-loading');
+      refreshBtn.disabled = false;
+    }
+  })();
 
   try {
-    const data = await invoke('fetch_dashboard');
-    renderDashboard(data);
-  } catch (e) {
-    const msg = typeof e === 'string' ? e : (e?.message || e?.toString?.() || '未知错误');
-    if (msg.includes('401') || msg.includes('认证失败')) {
-      showScreen('config');
-      showConfigError('Cookie 无效或已过期, 请重新获取');
-      saveBtn.disabled = false;
-    } else if (msg.includes('网络') || msg.includes('timeout') || msg.includes('connect')) {
-      showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '网络连接失败：') + msg);
-    } else {
-      showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '获取数据失败：') + msg);
-    }
+    return await dashboardRequest;
   } finally {
-    refreshBtn.classList.remove('is-loading');
-    refreshBtn.disabled = false;
+    dashboardRequest = null;
   }
 }
 
@@ -190,15 +202,14 @@ $('#settings-btn').addEventListener('click', async () => {
 
 // ═══ 后台刷新事件 ═══
 async function setupEventListener() {
-  if (listen) {
-    // 监听后台自动刷新的数据推送
-    const unlisten = await listen('dashboard-updated', (event) => {
-      if (event.payload) {
-        renderDashboard(event.payload);
-      }
+  if (!listen || window._unlistenDashboard) return;
+
+  try {
+    window._unlistenDashboard = await listen('dashboard-updated', (event) => {
+      if (event.payload) renderDashboard(event.payload);
     });
-    // 防止重复注册
-    window._unlistenDashboard = unlisten;
+  } catch (e) {
+    console.error('监听后台刷新事件失败:', e);
   }
 }
 
@@ -210,7 +221,7 @@ async function init() {
     return;
   }
 
-  setupEventListener();
+  await setupEventListener();
 
   try {
     const cfg = await invoke('get_config');

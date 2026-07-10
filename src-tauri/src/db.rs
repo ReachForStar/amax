@@ -44,7 +44,9 @@ impl Db {
     }
 
     fn decrypt_secret(raw: String) -> Option<String> {
-        let encrypted = raw.strip_prefix(ENCRYPTED_PREFIX)?;
+        let Some(encrypted) = raw.strip_prefix(ENCRYPTED_PREFIX) else {
+            return Some(raw);
+        };
         crypto::decrypt(encrypted)
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
@@ -141,5 +143,28 @@ impl Db {
             [],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Db;
+
+    #[test]
+    fn decrypt_secret_reads_legacy_plaintext() {
+        let value = "session=legacy-cookie".to_string();
+        assert_eq!(Db::decrypt_secret(value.clone()), Some(value));
+    }
+
+    #[test]
+    fn encrypt_secret_round_trips() {
+        let value = "session=encrypted-cookie";
+        let encrypted = Db::encrypt_secret(value).expect("加密应成功");
+        assert_eq!(Db::decrypt_secret(encrypted).as_deref(), Some(value));
+    }
+
+    #[test]
+    fn decrypt_secret_rejects_invalid_encrypted_value() {
+        assert_eq!(Db::decrypt_secret("dpapi:v1:invalid".to_string()), None);
     }
 }

@@ -139,25 +139,45 @@ pub async fn fetch_dashboard(
             Some(key) => serde_json::json!({ "api_keys": [key] }),
             None => serde_json::json!({}),
         };
-        let response = client
+        let response = match client
             .post(url)
             .header("Cookie", cookie)
             .json(&body)
             .send()
             .await
-            .map_err(|error| format!("网络连接失败 (日志查询): {error}"))?;
+        {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("日志查询失败，保留账户额度数据: {error}");
+                logs_available = false;
+                break;
+            }
+        };
 
         if !response.status().is_success() {
+            eprintln!(
+                "日志查询返回异常状态，保留账户额度数据: {}",
+                response.status()
+            );
             logs_available = false;
             break;
         }
 
-        let logs_response: LogsResponse = response
-            .json()
-            .await
-            .map_err(|error| format!("解析失败 (logs): {error}"))?;
+        let logs_response: LogsResponse = match response.json().await {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("日志响应解析失败，保留账户额度数据: {error}");
+                logs_available = false;
+                break;
+            }
+        };
         if !(0..=MAX_LOG_PAGES).contains(&logs_response.total_pages) {
-            return Err(format!("日志分页数据异常: {}", logs_response.total_pages));
+            eprintln!(
+                "日志分页数据异常，保留账户额度数据: {}",
+                logs_response.total_pages
+            );
+            logs_available = false;
+            break;
         }
         for entry in logs_response.data {
             summary.add(entry);
