@@ -1,0 +1,231 @@
+// ═══ Tauri IPC 封装 ═══
+const invoke = (() => {
+  if (window.__TAURI__?.core?.invoke) {
+    return (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+  }
+  if (window.__TAURI_INTERNALS__?.invoke) {
+    return (cmd, args) => window.__TAURI_INTERNALS__.invoke(cmd, args);
+  }
+  if (window.__TAURI__?.invoke) {
+    return (cmd, args) => window.__TAURI__.invoke(cmd, args);
+  }
+  return null;
+})();
+
+// Tauri 事件监听
+const listen = window.__TAURI__?.event?.listen
+  || window.__TAURI__?.core?.event?.listen;
+
+// ═══ DOM ═══
+const $ = (sel) => document.querySelector(sel);
+const configScreen = $('#config-screen');
+const dashboardScreen = $('#dashboard-screen');
+const configStatus = $('#config-status');
+const skeleton = $('#skeleton');
+const errorEl = $('#error-msg');
+const dashboardData = $('#dashboard-data');
+const cookieInput = $('#cookie-input');
+const apikeyInput = $('#apikey-input');
+const saveBtn = $('#save-btn');
+
+let hasDashboardData = false;
+let hasSavedCookie = false;
+let lastUpdatedAt = null;
+let updateTimeTimer = null;
+
+// ═══ 工具 ═══
+function formatTokens(n) {
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+function showScreen(screen) {
+  configScreen.classList.toggle('hidden', screen !== 'config');
+  dashboardScreen.classList.toggle('hidden', screen !== 'dashboard');
+}
+
+function showSkeleton() {
+  skeleton.classList.remove('hidden');
+  dashboardData.classList.add('hidden');
+  errorEl.classList.add('hidden');
+}
+
+function showError(msg) {
+  errorEl.textContent = msg;
+  errorEl.classList.remove('hidden');
+  skeleton.classList.add('hidden');
+  if (!hasDashboardData) dashboardData.classList.add('hidden');
+}
+
+function formatRelativeTime(date) {
+  const seconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return '刚刚更新';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+function updateLastUpdated() {
+  if (!lastUpdatedAt) return;
+  const el = $('#last-updated');
+  el.textContent = formatRelativeTime(lastUpdatedAt);
+  el.title = '最后更新: ' + lastUpdatedAt.toLocaleString('zh-CN');
+}
+
+function markUpdated() {
+  lastUpdatedAt = new Date();
+  updateLastUpdated();
+  if (!updateTimeTimer) {
+    updateTimeTimer = window.setInterval(updateLastUpdated, 30_000);
+  }
+}
+
+function showConfigError(msg) {
+  configStatus.className = 'status error';
+  configStatus.textContent = msg;
+  configStatus.classList.remove('hidden');
+}
+
+// ═══ 配置页 ═══
+saveBtn.addEventListener('click', async () => {
+  let cookie = cookieInput.value.trim();
+  if (!cookie && !hasSavedCookie) { showConfigError('请填写 Session Cookie'); return; }
+  if (cookie && !cookie.toLowerCase().startsWith('session=')) {
+    cookie = 'session=' + cookie;
+    cookieInput.value = cookie;
+  }
+  if (cookie && cookie.length < 50) {
+    showConfigError('Cookie 太短 (< 50 字符), 请确认已完整复制。\n\n获取方式: 浏览器 F12 → Application → Cookies → 双击 session 的 Value 列 → Ctrl+C');
+    return;
+  }
+
+  configStatus.className = 'status loading';
+  configStatus.textContent = '正在验证并获取数据...';
+  configStatus.classList.remove('hidden');
+  saveBtn.disabled = true;
+
+  try {
+    await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
+    await loadDashboard();
+  } catch (e) {
+    saveBtn.disabled = false;
+    const msg = typeof e === 'string' ? e : (e?.message || e?.toString?.() || '未知错误');
+    showConfigError('连接失败: ' + msg);
+  }
+});
+
+// ═══ 看板 ═══
+async function loadDashboard() {
+  showScreen('dashboard');
+  if (!hasDashboardData) showSkeleton();
+  errorEl.classList.add('hidden');
+  const refreshBtn = $('#refresh-btn');
+  refreshBtn.classList.add('is-loading');
+  refreshBtn.disabled = true;
+
+  try {
+    const data = await invoke('fetch_dashboard');
+    renderDashboard(data);
+  } catch (e) {
+    const msg = typeof e === 'string' ? e : (e?.message || e?.toString?.() || '未知错误');
+    if (msg.includes('401') || msg.includes('认证失败')) {
+      showScreen('config');
+      showConfigError('Cookie 无效或已过期, 请重新获取');
+      saveBtn.disabled = false;
+    } else if (msg.includes('网络') || msg.includes('timeout') || msg.includes('connect')) {
+      showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '网络连接失败：') + msg);
+    } else {
+      showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '获取数据失败：') + msg);
+    }
+  } finally {
+    refreshBtn.classList.remove('is-loading');
+    refreshBtn.disabled = false;
+  }
+}
+
+function renderDashboard(d) {
+  hasDashboardData = true;
+  skeleton.classList.add('hidden');
+  dashboardData.classList.remove('hidden');
+  errorEl.classList.add('hidden');
+
+  $('#user-name').textContent = '👋 你好, ' + d.display_name;
+  $('#user-requests').textContent = '累计请求: ' + d.request_count.toLocaleString();
+  $('#today-yuan').textContent = d.logs_available ? '¥' + d.today_yuan.toFixed(6) : '暂不可用';
+  $('#log-count').textContent = d.logs_available ? d.log_count + ' 次请求' : '日志接口暂不可用';
+  $('#today-tokens').textContent = d.logs_available ? formatTokens(d.today_tokens) + ' tokens' : '暂不可用';
+  $('#token-detail').textContent = d.logs_available
+    ? '入 ' + formatTokens(d.today_input) + ' / 出 ' + formatTokens(d.today_output)
+    : '额度信息仍可正常查看';
+  $('#quota-percent').textContent = d.percent.toFixed(1) + '%';
+  $('#progress-fill').style.width = Math.min(d.percent, 100).toFixed(1) + '%';
+  $('#quota-remaining').textContent = '🟢 剩余 ¥' + d.remaining.toFixed(2);
+  $('#quota-total').textContent = '总额 ¥' + d.total.toFixed(2);
+  $('#quota-used').textContent = '已使用 ¥' + d.used.toFixed(2);
+  markUpdated();
+}
+
+// ═══ 按钮 ═══
+$('#refresh-btn').addEventListener('click', () => loadDashboard());
+
+$('#settings-btn').addEventListener('click', async () => {
+  try {
+    const cfg = await invoke('get_config');
+    cookieInput.value = '';
+    apikeyInput.value = '';
+    cookieInput.placeholder = cfg.has_cookie
+      ? '已安全保存；不修改请留空'
+      : 'session=MTc4MzQyOTkyN3xE...';
+    apikeyInput.placeholder = cfg.has_api_key
+      ? '已安全保存；不修改请留空'
+      : 'sk-...';
+    configStatus.classList.add('hidden');
+    saveBtn.disabled = false;
+  } catch (_) {}
+  showScreen('config');
+});
+
+// ═══ 后台刷新事件 ═══
+async function setupEventListener() {
+  if (listen) {
+    // 监听后台自动刷新的数据推送
+    const unlisten = await listen('dashboard-updated', (event) => {
+      if (event.payload) {
+        renderDashboard(event.payload);
+      }
+    });
+    // 防止重复注册
+    window._unlistenDashboard = unlisten;
+  }
+}
+
+// ═══ 启动 ═══
+async function init() {
+  if (!invoke) {
+    document.body.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#888;font-family:sans-serif">请在 Tauri 环境中运行此应用</div>';
+    return;
+  }
+
+  setupEventListener();
+
+  try {
+    const cfg = await invoke('get_config');
+    hasSavedCookie = cfg.has_cookie;
+    if (cfg.has_cookie && !cfg.expired) {
+      await loadDashboard();
+    } else {
+      if (!cfg.has_cookie) { /* 首次使用 */ }
+      else if (cfg.expired) { showConfigError('Cookie 已过期 (超过 24 小时), 请重新获取'); }
+      showScreen('config');
+    }
+  } catch (e) {
+    showScreen('config');
+    showConfigError('初始化失败: ' + (e?.message || e?.toString?.() || e));
+  }
+}
+
+init();

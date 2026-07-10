@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AMAX Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- ═══ 配置页 ═══ -->
+  <div id="config-screen" class="screen">
+    <div class="config-card">
+      <h1 class="title">AMAX Dashboard</h1>
+      <p class="subtitle">请填写认证信息</p>
+
+      <div class="form-group">
+        <label>Session Cookie</label>
+        <input type="password" id="cookie-input" placeholder="session=MTc4MzQyOTkyN3xE..." autocomplete="off" />
+        <span class="hint">
+          1. 打开 <a href="https://ai.amaxsmp.com/dashboard" target="_blank">ai.amaxsmp.com/dashboard</a> 并登录<br/>
+          2. 按 F12 → Application → Cookies → 找到 session<br/>
+          3. 双击 Value 列全选 → Ctrl+C 复制<br/>
+          4. 完整值以 <code>session=</code> 开头, 长度约 300+ 字符
+        </span>
+      </div>
+
+      <div class="form-group">
+        <label>API Key <small>(可选)</small></label>
+        <input type="password" id="apikey-input" placeholder="sk-..." autocomplete="off" />
+        <span class="hint">用于获取今日消耗详情, 不填则只显示额度信息</span>
+      </div>
+
+      <div id="config-status" class="status hidden"></div>
+
+      <button id="save-btn" class="btn primary full">💾 保存并登录</button>
+    </div>
+  </div>
+
+  <!-- ═══ 看板页 ═══ -->
+  <div id="dashboard-screen" class="screen hidden">
+    <header class="topbar">
+      <h2>AMAX Dashboard</h2>
+      <div class="topbar-actions">
+        <span id="last-updated" class="update-time"></span>
+        <button id="refresh-btn" class="btn icon" title="刷新数据" aria-label="刷新数据">↻</button>
+        <button id="settings-btn" class="btn icon" title="设置" aria-label="设置">⚙</button>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- 骨架屏 -->
+      <div id="skeleton" class="hidden">
+        <div class="sk-row"><div class="sk-line w60"></div><div class="sk-line w30"></div></div>
+        <div class="sk-card-row">
+          <div class="sk-card"><div class="sk-line w40"></div><div class="sk-line w80 sk-h-lg"></div><div class="sk-line w50"></div></div>
+          <div class="sk-card"><div class="sk-line w40"></div><div class="sk-line w80 sk-h-lg"></div><div class="sk-line w50"></div></div>
+        </div>
+        <div class="sk-card sk-card-lg">
+          <div class="sk-line w30"></div>
+          <div class="sk-row"><div class="sk-line w25 sk-h-xl"></div></div>
+          <div class="sk-bar"></div>
+          <div class="sk-row"><div class="sk-line w40"></div><div class="sk-line w30"></div></div>
+        </div>
+      </div>
+
+      <!-- 错误 -->
+      <div id="error-msg" class="center hidden"></div>
+
+      <!-- 看板数据 -->
+      <div id="dashboard-data" class="hidden">
+        <div class="user-row">
+          <span id="user-name" class="user-name"></span>
+          <span id="user-requests" class="user-meta"></span>
+        </div>
+
+        <div class="card-row">
+          <div class="metric-card">
+            <div class="metric-label">💰 今天消耗</div>
+            <div id="today-yuan" class="metric-value orange"></div>
+            <div id="log-count" class="metric-sub"></div>
+          </div>
+          <div class="metric-card">
+            <div class="metric-label">📊 Token 消耗</div>
+            <div id="today-tokens" class="metric-value cyan"></div>
+            <div id="token-detail" class="metric-sub"></div>
+          </div>
+        </div>
+
+        <div class="quota-card">
+          <div class="quota-label">💳 额度概况</div>
+          <div class="quota-percent-row">
+            <span id="quota-percent" class="quota-percent"></span>
+            <span class="quota-label-sm">剩余可用</span>
+          </div>
+          <div class="progress-bar">
+            <div id="progress-fill" class="progress-fill"></div>
+          </div>
+          <div class="quota-detail">
+            <span id="quota-remaining"></span>
+            <span id="quota-total"></span>
+          </div>
+          <div id="quota-used" class="quota-used"></div>
+        </div>
+
+      </div>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

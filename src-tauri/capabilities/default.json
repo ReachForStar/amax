@@ -1,0 +1,12 @@
+{
+  "identifier": "default",
+  "description": "默认权限 — IPC + 通知",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "notification:allow-notify",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission"
+  ]
+}
