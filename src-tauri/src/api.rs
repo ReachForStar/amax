@@ -36,6 +36,22 @@ struct LogsResponse {
     data: Vec<LogEntry>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum LogsPayload {
+    Direct(LogsResponse),
+    Enveloped(ApiEnvelope<LogsResponse>),
+}
+
+impl LogsPayload {
+    fn into_response(self) -> LogsResponse {
+        match self {
+            Self::Direct(response) => response,
+            Self::Enveloped(envelope) => envelope.data,
+        }
+    }
+}
+
 #[derive(Default)]
 struct LogSummary {
     quota: f64,
@@ -163,8 +179,8 @@ pub async fn fetch_dashboard(
             break;
         }
 
-        let logs_response: LogsResponse = match response.json().await {
-            Ok(response) => response,
+        let logs_response = match response.json::<LogsPayload>().await {
+            Ok(payload) => payload.into_response(),
             Err(error) => {
                 eprintln!("日志响应解析失败，保留账户额度数据: {error}");
                 logs_available = false;
@@ -187,7 +203,6 @@ pub async fn fetch_dashboard(
         }
         page += 1;
     }
-
     Ok(DashboardData {
         display_name: user.display_name,
         request_count: user.request_count,
@@ -202,4 +217,28 @@ pub async fn fetch_dashboard(
         percent,
         logs_available,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LogsPayload, LogsResponse};
+
+    fn assert_empty_response(response: LogsResponse) {
+        assert_eq!(response.total_pages, 0);
+        assert!(response.data.is_empty());
+    }
+
+    #[test]
+    fn parses_direct_logs_response() {
+        let payload: LogsPayload =
+            serde_json::from_str(r#"{"total_pages":0,"data":[]}"#).expect("应解析直接日志响应");
+        assert_empty_response(payload.into_response());
+    }
+
+    #[test]
+    fn parses_enveloped_logs_response() {
+        let payload: LogsPayload = serde_json::from_str(r#"{"data":{"total_pages":0,"data":[]}}"#)
+            .expect("应解析带信封的日志响应");
+        assert_empty_response(payload.into_response());
+    }
 }
