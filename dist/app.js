@@ -183,6 +183,8 @@ async function loadDashboard() {
     } catch (e) {
       const msg = getErrorMessage(e);
       if (msg.includes('401') || msg.includes('认证失败')) {
+        canReturnToDashboard = false;
+        backBtn.classList.add('hidden');
         showScreen('config');
         showConfigError('Cookie 无效或已过期, 请重新获取');
         setConfigBusy(false);
@@ -206,6 +208,7 @@ async function loadDashboard() {
 
 function renderDashboard(d) {
   hasDashboardData = true;
+  canReturnToDashboard = true;
   skeleton.classList.add('hidden');
   dashboardData.classList.remove('hidden');
   errorEl.classList.add('hidden');
@@ -234,7 +237,7 @@ function renderDashboard(d) {
 $('#refresh-btn').addEventListener('click', () => loadDashboard());
 backBtn.addEventListener('click', leaveSettings);
 
-settingsBtn.addEventListener('click', async () => {
+async function openSettings() {
   try {
     const cfg = await invoke('get_config');
     resetConfigForm();
@@ -245,11 +248,15 @@ settingsBtn.addEventListener('click', async () => {
       ? '已安全保存；不修改请留空'
       : 'sk-...';
     setConfigBusy(false);
-  } catch (_) {}
-  canReturnToDashboard = hasDashboardData;
-  backBtn.classList.toggle('hidden', !canReturnToDashboard);
-  showScreen('config');
-});
+    backBtn.classList.toggle('hidden', !canReturnToDashboard);
+    showScreen('config');
+    cookieInput.focus();
+  } catch (error) {
+    showError('无法打开设置：' + getErrorMessage(error));
+  }
+}
+
+settingsBtn.addEventListener('click', openSettings);
 
 // ═══ 后台刷新事件 ═══
 async function setupEventListener() {
@@ -257,7 +264,7 @@ async function setupEventListener() {
 
   try {
     window._unlistenDashboard = await listen('dashboard-updated', (event) => {
-      if (event.payload) renderDashboard(event.payload);
+      if (event.payload && hasDashboardData) renderDashboard(event.payload);
     });
   } catch (e) {
     console.error('监听后台刷新事件失败:', e);
@@ -276,6 +283,8 @@ async function init() {
 
   try {
     const cfg = await invoke('get_config');
+    canReturnToDashboard = false;
+    backBtn.classList.add('hidden');
     hasSavedCookie = cfg.has_cookie;
     if (cfg.has_cookie && !cfg.expired) {
       await loadDashboard();

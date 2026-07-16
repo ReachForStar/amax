@@ -162,15 +162,21 @@ test('确认放弃修改时应清空输入并返回看板', async () => {
   assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
 });
 
-test('已加载看板设置读取失败后仍应提供返回入口', async () => {
+test('设置读取失败时应停留看板并显示错误', async () => {
   const app = createHarness({ configErrorOnSettings: true });
   await app.flush();
+  app.elements['error-msg'].classList.add('hidden');
   await app.elements['settings-btn'].dispatch('click');
   await app.flush();
 
-  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
-  assert.equal(app.elements['back-btn'].classList.contains('hidden'), false);
-
-  await app.elements['back-btn'].dispatch('click');
   assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+  assert.match(app.elements['error-msg'].textContent, /无法打开设置：数据库不可用/);
+});
+
+test('首次配置页不应显示返回按钮', async () => {
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  await app.flush();
+
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
+  assert.equal(app.elements['back-btn'].classList.contains('hidden'), true);
 });
