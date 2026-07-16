@@ -27,12 +27,18 @@ const dashboardData = $('#dashboard-data');
 const cookieInput = $('#cookie-input');
 const apikeyInput = $('#apikey-input');
 const saveBtn = $('#save-btn');
+const configForm = $('#config-form');
+const backBtn = $('#back-btn');
+const settingsBtn = $('#settings-btn');
 
 let hasDashboardData = false;
 let hasSavedCookie = false;
 let lastUpdatedAt = null;
 let updateTimeTimer = null;
 let dashboardRequest = null;
+let canReturnToDashboard = false;
+let configBaseline = { cookie: '', apiKey: '' };
+let isSavingConfig = false;
 
 // ═══ 工具 ═══
 function formatTokens(n) {
@@ -41,9 +47,44 @@ function formatTokens(n) {
   return String(n);
 }
 
+function getErrorMessage(error) {
+  if (typeof error === 'string') return error;
+  return error?.message || error?.toString?.() || '未知错误';
+}
+
 function showScreen(screen) {
-  configScreen.classList.toggle('hidden', screen !== 'config');
-  dashboardScreen.classList.toggle('hidden', screen !== 'dashboard');
+  const showingConfig = screen === 'config';
+  configScreen.classList.toggle('hidden', !showingConfig);
+  configScreen.setAttribute('aria-hidden', String(!showingConfig));
+  dashboardScreen.classList.toggle('hidden', showingConfig);
+  dashboardScreen.setAttribute('aria-hidden', String(showingConfig));
+}
+
+function setConfigBusy(isBusy) {
+  isSavingConfig = isBusy;
+  saveBtn.disabled = isBusy;
+  backBtn.disabled = isBusy;
+  configForm.setAttribute('aria-busy', String(isBusy));
+}
+
+function resetConfigForm() {
+  cookieInput.value = '';
+  apikeyInput.value = '';
+  configBaseline = { cookie: '', apiKey: '' };
+  configStatus.classList.add('hidden');
+}
+
+function isConfigDirty() {
+  return cookieInput.value !== configBaseline.cookie
+    || apikeyInput.value !== configBaseline.apiKey;
+}
+
+function leaveSettings() {
+  if (!canReturnToDashboard || isSavingConfig) return;
+  if (isConfigDirty() && !window.confirm('放弃未保存的修改并返回吗？')) return;
+  resetConfigForm();
+  showScreen('dashboard');
+  settingsBtn.focus();
 }
 
 function showSkeleton() {
@@ -95,7 +136,8 @@ function showConfigError(msg) {
 }
 
 // ═══ 配置页 ═══
-saveBtn.addEventListener('click', async () => {
+configForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
   let cookie = cookieInput.value.trim();
   if (!cookie && !hasSavedCookie) { showConfigError('请填写 Session Cookie'); return; }
   if (cookie && !cookie.toLowerCase().startsWith('session=')) {
@@ -110,15 +152,15 @@ saveBtn.addEventListener('click', async () => {
   configStatus.className = 'status loading';
   configStatus.textContent = '正在验证并获取数据...';
   configStatus.classList.remove('hidden');
-  saveBtn.disabled = true;
+  setConfigBusy(true);
 
   try {
     await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
     if (cookie) hasSavedCookie = true;
     await loadDashboard();
   } catch (e) {
-    saveBtn.disabled = false;
-    const msg = typeof e === 'string' ? e : (e?.message || e?.toString?.() || '未知错误');
+    setConfigBusy(false);
+    const msg = getErrorMessage(e);
     showConfigError('连接失败: ' + msg);
   }
 });
@@ -139,11 +181,11 @@ async function loadDashboard() {
       const data = await invoke('fetch_dashboard');
       renderDashboard(data);
     } catch (e) {
-      const msg = typeof e === 'string' ? e : (e?.message || e?.toString?.() || '未知错误');
+      const msg = getErrorMessage(e);
       if (msg.includes('401') || msg.includes('认证失败')) {
         showScreen('config');
         showConfigError('Cookie 无效或已过期, 请重新获取');
-        saveBtn.disabled = false;
+        setConfigBusy(false);
       } else if (msg.includes('网络') || msg.includes('timeout') || msg.includes('connect')) {
         showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '网络连接失败：') + msg);
       } else {
@@ -190,20 +232,21 @@ function renderDashboard(d) {
 
 // ═══ 按钮 ═══
 $('#refresh-btn').addEventListener('click', () => loadDashboard());
+backBtn.addEventListener('click', leaveSettings);
 
-$('#settings-btn').addEventListener('click', async () => {
+settingsBtn.addEventListener('click', async () => {
   try {
     const cfg = await invoke('get_config');
-    cookieInput.value = '';
-    apikeyInput.value = '';
+    resetConfigForm();
     cookieInput.placeholder = cfg.has_cookie
       ? '已安全保存；不修改请留空'
       : 'session=MTc4MzQyOTkyN3xE...';
     apikeyInput.placeholder = cfg.has_api_key
       ? '已安全保存；不修改请留空'
       : 'sk-...';
-    configStatus.classList.add('hidden');
-    saveBtn.disabled = false;
+    setConfigBusy(false);
+    canReturnToDashboard = hasDashboardData;
+    backBtn.classList.toggle('hidden', !canReturnToDashboard);
   } catch (_) {}
   showScreen('config');
 });

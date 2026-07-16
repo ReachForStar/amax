@@ -122,3 +122,40 @@ test('配置表单应使用提交语义并提供可访问的返回按钮', () =>
   assert.match(html, /<button id="back-btn"[^>]*aria-label="返回看板"/);
   assert.match(html, /id="dashboard-screen"[^>]*aria-hidden="true"/);
 });
+
+test('未修改设置时返回看板不应确认', async () => {
+  const app = createHarness();
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  await app.elements['back-btn'].dispatch('click');
+
+  assert.equal(app.confirmCalls.length, 0);
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+  assert.equal(app.elements['config-screen'].getAttribute('aria-hidden'), 'true');
+});
+
+test('取消放弃修改时应保留设置页和输入', async () => {
+  const app = createHarness({ confirm: false });
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  app.elements['cookie-input'].value = 'session=changed';
+  await app.elements['back-btn'].dispatch('click');
+
+  assert.deepEqual(app.confirmCalls, ['放弃未保存的修改并返回吗？']);
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
+  assert.equal(app.elements['cookie-input'].value, 'session=changed');
+});
+
+test('确认放弃修改时应清空输入并返回看板', async () => {
+  const app = createHarness({ confirm: true });
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  app.elements['apikey-input'].value = 'sk-changed';
+  await app.elements['back-btn'].dispatch('click');
+
+  assert.equal(app.elements['apikey-input'].value, '');
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+});
