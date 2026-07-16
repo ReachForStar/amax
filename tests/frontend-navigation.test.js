@@ -113,3 +113,12 @@ test('已加载看板进入设置后应提供返回入口', async () => {
   assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
   assert.equal(app.elements['back-btn'].classList.contains('hidden'), false);
 });
+
+test('配置表单应使用提交语义并提供可访问的返回按钮', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'dist', 'index.html'), 'utf8');
+
+  assert.match(html, /<form id="config-form"[^>]*>/);
+  assert.match(html, /<button id="save-btn" type="submit"/);
+  assert.match(html, /<button id="back-btn"[^>]*aria-label="返回看板"/);
+  assert.match(html, /id="dashboard-screen"[^>]*aria-hidden="true"/);
+});

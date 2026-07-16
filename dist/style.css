@@ -28,6 +28,7 @@ a { color: var(--accent); text-underline-offset: 3px; }
 .config-screen { padding: 52px 44px 60px; }
 .config-shell { width: 100%; max-width: 432px; margin: 0 auto; }
 .access-header { padding-bottom: 28px; border-bottom: 1px solid var(--line); }
+.access-nav { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .access-header h1 { margin: 18px 0 9px; font-size: 30px; line-height: 1.15; letter-spacing: -.04em; }
 .access-intro { max-width: 34em; margin: 0; color: var(--muted); line-height: 1.65; }
 .config-form { display: grid; gap: 25px; padding-top: 27px; }
@@ -49,6 +50,8 @@ a { color: var(--accent); text-underline-offset: 3px; }
 .btn:disabled { cursor: wait; opacity: .5; }
 .btn.primary { min-height: 44px; background: var(--accent); color: #f7faf7; font-weight: 650; }
 .btn.primary:hover:not(:disabled) { background: #245a3f; }
+.btn.secondary { min-height: 34px; padding: 0 11px; border: 1px solid var(--line); background: transparent; color: var(--muted); font-size: 12px; font-weight: 650; }
+.btn.secondary:hover:not(:disabled) { border-color: #91a298; background: var(--surface-pressed); color: var(--ink); }
 
 .topbar { position: sticky; top: 0; z-index: 2; display: flex; justify-content: space-between; align-items: center; min-height: 58px; padding: 0 22px; border-bottom: 1px solid var(--line); background: rgba(232, 236, 232, .94); }
 .topbar-actions, .sync-state { display: flex; align-items: center; }
