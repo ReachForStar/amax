@@ -245,9 +245,9 @@ settingsBtn.addEventListener('click', async () => {
       ? '已安全保存；不修改请留空'
       : 'sk-...';
     setConfigBusy(false);
-    canReturnToDashboard = hasDashboardData;
-    backBtn.classList.toggle('hidden', !canReturnToDashboard);
   } catch (_) {}
+  canReturnToDashboard = hasDashboardData;
+  backBtn.classList.toggle('hidden', !canReturnToDashboard);
   showScreen('config');
 });
 

@@ -38,7 +38,7 @@ class Element {
   focus() { this.onFocus?.(this); }
 }
 
-function createHarness({ config, dashboard, confirm = true, configError } = {}) {
+function createHarness({ config, dashboard, confirm = true, configError, configErrorOnSettings = false } = {}) {
   const ids = [
     'config-screen', 'dashboard-screen', 'config-status', 'skeleton', 'error-msg',
     'dashboard-data', 'cookie-input', 'apikey-input', 'save-btn', 'back-btn',
@@ -72,7 +72,9 @@ function createHarness({ config, dashboard, confirm = true, configError } = {}) 
   const invoke = async (command) => {
     invokeCalls.push(command);
     if (command === 'get_config') {
-      if (configError) throw configError;
+      if (configError || (configErrorOnSettings && invokeCalls.filter((call) => call === 'get_config').length > 1)) {
+        throw configError || '数据库不可用';
+      }
       return config ?? { has_cookie: true, has_api_key: false, expired: false };
     }
     if (command === 'fetch_dashboard') {
@@ -157,5 +159,18 @@ test('确认放弃修改时应清空输入并返回看板', async () => {
   await app.elements['back-btn'].dispatch('click');
 
   assert.equal(app.elements['apikey-input'].value, '');
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+});
+
+test('已加载看板设置读取失败后仍应提供返回入口', async () => {
+  const app = createHarness({ configErrorOnSettings: true });
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
+  assert.equal(app.elements['back-btn'].classList.contains('hidden'), false);
+
+  await app.elements['back-btn'].dispatch('click');
   assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
 });
