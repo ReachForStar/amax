@@ -157,8 +157,7 @@ configForm.addEventListener('submit', async (event) => {
   try {
     await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
     if (cookie) hasSavedCookie = true;
-    await loadDashboard();
-    resetConfigForm();
+    if (await loadDashboard()) resetConfigForm();
   } catch (e) {
     setConfigBusy(false);
     const msg = getErrorMessage(e);
@@ -181,6 +180,7 @@ async function loadDashboard() {
     try {
       const data = await invoke('fetch_dashboard');
       renderDashboard(data);
+      return true;
     } catch (e) {
       const msg = getErrorMessage(e);
       if (msg.includes('401') || msg.includes('认证失败')) {
@@ -194,6 +194,7 @@ async function loadDashboard() {
       } else {
         showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '获取数据失败：') + msg);
       }
+      return false;
     } finally {
       refreshBtn.classList.remove('is-loading');
       refreshBtn.disabled = false;

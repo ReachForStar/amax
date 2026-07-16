@@ -46,6 +46,7 @@ function createHarness({
   configErrorOnSettings = false,
   pendingSaveConfig = false,
   saveError,
+  dashboardError,
 } = {}) {
   const ids = [
     'config-screen', 'dashboard-screen', 'config-status', 'skeleton', 'error-msg',
@@ -95,6 +96,7 @@ function createHarness({
       return undefined;
     }
     if (command === 'fetch_dashboard') {
+      if (dashboardError) throw dashboardError;
       return dashboard ?? {
         display_name: 'Tester', request_count: 3, logs_available: true,
         today_yuan: 1.25, log_count: 2, today_tokens: 1200,
@@ -256,4 +258,38 @@ test('保存失败应恢复忙碌状态并保留输入', async () => {
   assert.equal(app.elements['back-btn'].disabled, false);
   assert.equal(app.elements['cookie-input'].value, cookie);
   assert.match(app.elements['config-status'].textContent, /连接失败：保存失败/);
+});
+
+test('保存成功但认证失败应恢复状态、保留输入和错误', async () => {
+  const app = createHarness({ dashboardError: '401 认证失败' });
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  const cookie = `session=${'z'.repeat(50)}`;
+  app.elements['cookie-input'].value = cookie;
+
+  await app.elements['config-form'].dispatch('submit');
+  await app.flush();
+
+  assert.equal(app.elements['config-form'].getAttribute('aria-busy'), 'false');
+  assert.equal(app.elements['save-btn'].disabled, false);
+  assert.equal(app.elements['back-btn'].disabled, false);
+  assert.equal(app.elements['cookie-input'].value, cookie);
+  assert.match(app.elements['config-status'].textContent, /Cookie 无效或已过期，请重新获取/);
+  assert.equal(app.elements['back-btn'].classList.contains('hidden'), true);
+});
+
+test('保存并加载看板成功后应清空配置输入', async () => {
+  const app = createHarness();
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  app.elements['cookie-input'].value = `session=${'s'.repeat(50)}`;
+  app.elements['apikey-input'].value = 'sk-saved';
+
+  await app.elements['config-form'].dispatch('submit');
+  await app.flush();
+
+  assert.equal(app.elements['cookie-input'].value, '');
+  assert.equal(app.elements['apikey-input'].value, '');
 });
