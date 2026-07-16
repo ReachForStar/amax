@@ -5,6 +5,7 @@ use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, params};
 
 const ENCRYPTED_PREFIX: &str = "dpapi:v1:";
+const COOKIE_VALID_DAYS: i64 = 15;
 
 pub struct Db {
     conn: Connection,
@@ -106,7 +107,7 @@ impl Db {
             .ok()
             .flatten()
             .and_then(|timestamp| DateTime::parse_from_rfc3339(&timestamp).ok())
-            .is_none_or(|saved_at| Utc::now() - Duration::hours(24) > saved_at)
+            .is_none_or(|saved_at| Utc::now() - Duration::days(COOKIE_VALID_DAYS) > saved_at)
     }
 
     pub fn get_api_key(&self) -> Option<String> {
@@ -149,6 +150,19 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::Db;
+    use chrono::{Duration, Utc};
+    use rusqlite::params;
+
+    fn db_with_cookie_saved_at(saved_at: &str) -> Db {
+        let db = Db::open(std::path::Path::new(":memory:")).expect("内存数据库应打开成功");
+        db.conn
+            .execute(
+                "INSERT INTO config(key, value) VALUES('cookie_saved_at', ?1)",
+                params![saved_at],
+            )
+            .expect("保存 Cookie 时间应成功");
+        db
+    }
 
     #[test]
     fn decrypt_secret_reads_legacy_plaintext() {
@@ -166,5 +180,35 @@ mod tests {
     #[test]
     fn decrypt_secret_rejects_invalid_encrypted_value() {
         assert_eq!(Db::decrypt_secret("dpapi:v1:invalid".to_string()), None);
+    }
+
+    #[test]
+    fn cookie_saved_less_than_fifteen_days_ago_is_not_expired() {
+        let saved_at = (Utc::now() - Duration::days(14)).to_rfc3339();
+        let db = db_with_cookie_saved_at(&saved_at);
+
+        assert!(!db.is_cookie_expired());
+    }
+
+    #[test]
+    fn cookie_saved_more_than_fifteen_days_ago_is_expired() {
+        let saved_at = (Utc::now() - Duration::days(16)).to_rfc3339();
+        let db = db_with_cookie_saved_at(&saved_at);
+
+        assert!(db.is_cookie_expired());
+    }
+
+    #[test]
+    fn missing_cookie_saved_at_is_expired() {
+        let db = Db::open(std::path::Path::new(":memory:")).expect("内存数据库应打开成功");
+
+        assert!(db.is_cookie_expired());
+    }
+
+    #[test]
+    fn invalid_cookie_saved_at_is_expired() {
+        let db = db_with_cookie_saved_at("invalid-timestamp");
+
+        assert!(db.is_cookie_expired());
     }
 }
