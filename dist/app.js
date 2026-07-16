@@ -157,7 +157,10 @@ configForm.addEventListener('submit', async (event) => {
   try {
     await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
     if (cookie) hasSavedCookie = true;
-    if (await loadDashboard()) resetConfigForm();
+    if (await loadDashboard()) {
+      setConfigBusy(false);
+      resetConfigForm();
+    }
   } catch (e) {
     setConfigBusy(false);
     const msg = getErrorMessage(e);

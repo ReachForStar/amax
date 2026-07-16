@@ -292,4 +292,7 @@ test('保存并加载看板成功后应清空配置输入', async () => {
 
   assert.equal(app.elements['cookie-input'].value, '');
   assert.equal(app.elements['apikey-input'].value, '');
+  assert.equal(app.elements['config-form'].getAttribute('aria-busy'), 'false');
+  assert.equal(app.elements['save-btn'].disabled, false);
+  assert.equal(app.elements['back-btn'].disabled, false);
 });
