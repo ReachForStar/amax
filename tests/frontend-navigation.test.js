@@ -38,7 +38,15 @@ class Element {
   focus() { this.onFocus?.(this); }
 }
 
-function createHarness({ config, dashboard, confirm = true, configError, configErrorOnSettings = false } = {}) {
+function createHarness({
+  config,
+  dashboard,
+  confirm = true,
+  configError,
+  configErrorOnSettings = false,
+  pendingSaveConfig = false,
+  saveError,
+} = {}) {
   const ids = [
     'config-screen', 'dashboard-screen', 'config-status', 'skeleton', 'error-msg',
     'dashboard-data', 'cookie-input', 'apikey-input', 'save-btn', 'back-btn',
@@ -69,6 +77,10 @@ function createHarness({ config, dashboard, confirm = true, configError, configE
     addEventListener(type, handler) { documentListeners.set(type, handler); },
   };
   const invokeCalls = [];
+  let resolveSaveConfig;
+  const saveConfigPromise = pendingSaveConfig
+    ? new Promise((resolve) => { resolveSaveConfig = resolve; })
+    : null;
   const invoke = async (command) => {
     invokeCalls.push(command);
     if (command === 'get_config') {
@@ -76,6 +88,11 @@ function createHarness({ config, dashboard, confirm = true, configError, configE
         throw configError || '数据库不可用';
       }
       return config ?? { has_cookie: true, has_api_key: false, expired: false };
+    }
+    if (command === 'save_config') {
+      if (saveError) throw saveError;
+      if (saveConfigPromise) return saveConfigPromise;
+      return undefined;
     }
     if (command === 'fetch_dashboard') {
       return dashboard ?? {
@@ -102,6 +119,7 @@ function createHarness({ config, dashboard, confirm = true, configError, configE
     confirmCalls,
     documentListeners,
     focused: () => focusedElement,
+    resolveSaveConfig: () => resolveSaveConfig?.(),
     flush: () => new Promise((resolve) => setImmediate(resolve)),
   };
 }
@@ -179,4 +197,63 @@ test('首次配置页不应显示返回按钮', async () => {
 
   assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
   assert.equal(app.elements['back-btn'].classList.contains('hidden'), true);
+});
+
+test('Escape 应复用设置返回规则', async () => {
+  const app = createHarness();
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+
+  app.documentListeners.get('keydown')({ key: 'Escape' });
+
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+  assert.equal(app.focused(), app.elements['settings-btn']);
+});
+
+test('进入设置页应聚焦 Cookie 输入框', async () => {
+  const app = createHarness();
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.focused(), app.elements['cookie-input']);
+});
+
+test('保存中应标记忙碌、禁用双按钮并阻止返回', async () => {
+  const app = createHarness({ pendingSaveConfig: true });
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  app.elements['cookie-input'].value = `session=${'x'.repeat(50)}`;
+
+  app.elements['config-form'].dispatch('submit');
+  await app.flush();
+
+  assert.equal(app.elements['config-form'].getAttribute('aria-busy'), 'true');
+  assert.equal(app.elements['save-btn'].disabled, true);
+  assert.equal(app.elements['back-btn'].disabled, true);
+  await app.elements['back-btn'].dispatch('click');
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
+
+  app.resolveSaveConfig();
+  await app.flush();
+});
+
+test('保存失败应恢复忙碌状态并保留输入', async () => {
+  const app = createHarness({ saveError: '保存失败' });
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  const cookie = `session=${'y'.repeat(50)}`;
+  app.elements['cookie-input'].value = cookie;
+
+  await app.elements['config-form'].dispatch('submit');
+  await app.flush();
+
+  assert.equal(app.elements['config-form'].getAttribute('aria-busy'), 'false');
+  assert.equal(app.elements['save-btn'].disabled, false);
+  assert.equal(app.elements['back-btn'].disabled, false);
+  assert.equal(app.elements['cookie-input'].value, cookie);
+  assert.match(app.elements['config-status'].textContent, /连接失败：保存失败/);
 });

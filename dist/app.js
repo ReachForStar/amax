@@ -145,7 +145,7 @@ configForm.addEventListener('submit', async (event) => {
     cookieInput.value = cookie;
   }
   if (cookie && cookie.length < 50) {
-    showConfigError('Cookie 太短 (< 50 字符), 请确认已完整复制。\n\n获取方式: 浏览器 F12 → Application → Cookies → 双击 session 的 Value 列 → Ctrl+C');
+    showConfigError('Cookie 太短（少于 50 个字符），请确认已完整复制。\n\n获取方式：浏览器 F12 → Application → Cookies → 双击 session 的 Value 列 → Ctrl+C');
     return;
   }
 
@@ -158,10 +158,11 @@ configForm.addEventListener('submit', async (event) => {
     await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
     if (cookie) hasSavedCookie = true;
     await loadDashboard();
+    resetConfigForm();
   } catch (e) {
     setConfigBusy(false);
     const msg = getErrorMessage(e);
-    showConfigError('连接失败: ' + msg);
+    showConfigError('连接失败：' + msg);
   }
 });
 
@@ -186,7 +187,7 @@ async function loadDashboard() {
         canReturnToDashboard = false;
         backBtn.classList.add('hidden');
         showScreen('config');
-        showConfigError('Cookie 无效或已过期, 请重新获取');
+        showConfigError('Cookie 无效或已过期，请重新获取');
         setConfigBusy(false);
       } else if (msg.includes('网络') || msg.includes('timeout') || msg.includes('connect')) {
         showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '网络连接失败：') + msg);
@@ -258,6 +259,12 @@ async function openSettings() {
 
 settingsBtn.addEventListener('click', openSettings);
 
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && !configScreen.classList.contains('hidden')) {
+    leaveSettings();
+  }
+});
+
 // ═══ 后台刷新事件 ═══
 async function setupEventListener() {
   if (!listen || window._unlistenDashboard) return;
@@ -295,7 +302,7 @@ async function init() {
     }
   } catch (e) {
     showScreen('config');
-    showConfigError('初始化失败: ' + (e?.message || e?.toString?.() || e));
+    showConfigError('初始化失败：' + getErrorMessage(e));
   }
 }
 
