@@ -20,9 +20,12 @@ cargo fmt --all -- --check
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 
-# 全部测试 / 单个精确测试
+# 全部测试 / 单个测试（`--exact` 需要完整模块路径）
 cargo test --workspace
-cargo test --workspace <test_name> -- --exact --nocapture
+cargo test --workspace db::tests::cookie_saved_more_than_fifteen_days_ago_is_expired -- --exact --nocapture
+
+# 按名称过滤测试（无需完整模块路径）
+cargo test --workspace <test_name> -- --nocapture
 
 # 前端 JavaScript 语法检查
 node --check dist/app.js
@@ -31,7 +34,7 @@ node --check dist/app.js
 cargo tauri build
 ```
 
-桌面端到端流程记录在 `.claude/skills/verify/SKILL.md`。涉及窗口、托盘、前端交互或数据展示时，必须运行真实应用验证；若 `target/debug/amax.exe` 被已有进程占用，应先让人工关闭应用，不要用 `cargo check` 代替运行验证。
+涉及窗口、托盘、前端交互或数据展示时，必须运行 `cargo tauri dev` 验证真实 WebView2 应用。若已有 `amax.exe` 运行，先让人工关闭，不要终止未知进程，也不要用 `cargo check` 代替运行验证。
 
 ## 架构
 
@@ -62,7 +65,7 @@ cargo tauri build
 - Token 使用 `summary.total_tokens/input_tokens/output_tokens`；费用使用 `summary.quota / QUOTA_PER_YUAN`，其中 `QUOTA_PER_YUAN = 500_000`。
 - 日志汇总失败时仍返回账户额度，不能把额度和日志查询改成全有或全无。
 
-`src-tauri/src/db.rs` 管理应用数据目录中的 SQLite：`config` 保存认证信息，`dashboard_snapshot` 保存刷新快照并清理 90 天前记录。Cookie 保存超过 24 小时视为过期。
+`src-tauri/src/db.rs` 管理应用数据目录中的 SQLite：`config` 保存认证信息，`dashboard_snapshot` 保存刷新快照并清理 90 天前记录。Cookie 保存后固定 15 天过期；缺失或无法解析 `cookie_saved_at` 时也视为过期。
 
 `src-tauri/src/crypto.rs` 使用 Windows DPAPI 将 Cookie/API Key 绑定当前用户和机器，加密结果以 `dpapi:v1:<hex>` 存入 SQLite。`Db::get_cookie` / `get_api_key` 仍兼容旧明文记录；调整持久化格式时必须保留迁移路径。非 Windows 构建不提供不安全的明文加密降级。
 
@@ -75,6 +78,6 @@ cargo tauri build
 
 ## 数据与界面流程
 
-启动后，前端调用 `get_config`：有效 Cookie 进入看板并调用 `fetch_dashboard`，否则显示配置页。`loadDashboard` 合并并发刷新请求；成功后 `renderDashboard` 更新卡片和更新时间，认证错误返回配置页，其他错误保留已有数据并显示重试信息。后台定时刷新走相同 Rust 聚合路径，通过事件更新前端。
+启动后，前端调用 `get_config`：有效 Cookie 进入看板并调用 `fetch_dashboard`，否则显示配置页。`loadDashboard` 合并并发刷新请求；成功后 `renderDashboard` 更新数据与更新时间，认证错误返回配置页，其他错误保留已有数据并显示重试信息。后台定时刷新走相同 Rust 聚合路径，通过事件更新前端。前端 JS 同时兼容 `window.__TAURI__.core.invoke`、`window.__TAURI_INTERNALS__.invoke` 和旧版 `window.__TAURI__.invoke`；调整 IPC 封装时不要删掉兼容分支。
 
 真实认证数据只存放在用户应用数据目录的 SQLite 中。运行数据请求依赖有效 Session Cookie；API Key 当前仅作为兼容配置保留，不参与官网账户级聚合。没有凭据时仍可验证配置页、窗口和托盘生命周期。
