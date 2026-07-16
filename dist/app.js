@@ -70,8 +70,12 @@ function formatRelativeTime(date) {
 }
 
 function updateLastUpdated() {
-  if (!lastUpdatedAt) return;
   const el = $('#last-updated');
+  if (!lastUpdatedAt) {
+    el.textContent = '等待同步';
+    el.removeAttribute('title');
+    return;
+  }
   el.textContent = formatRelativeTime(lastUpdatedAt);
   el.title = '最后更新: ' + lastUpdatedAt.toLocaleString('zh-CN');
 }
@@ -164,21 +168,23 @@ function renderDashboard(d) {
   dashboardData.classList.remove('hidden');
   errorEl.classList.add('hidden');
 
-  $('#user-name').textContent = '👋 你好, ' + d.display_name;
-  $('#user-requests').textContent = '累计请求: ' + d.request_count.toLocaleString();
+  $('#user-name').textContent = d.display_name + ' 的今日用量';
+  $('#user-requests').textContent = d.request_count.toLocaleString() + ' REQUESTS · 数据已同步';
   $('#today-yuan').textContent = d.logs_available ? '¥' + d.today_yuan.toFixed(6) : '暂不可用';
   $('#log-count').textContent = d.logs_available
     ? (d.log_count == null ? '成功请求汇总' : d.log_count + ' 次请求')
     : '日志接口暂不可用';
-  $('#today-tokens').textContent = d.logs_available ? formatTokens(d.today_tokens) + ' tokens' : '暂不可用';
+  $('#today-tokens').textContent = d.logs_available ? formatTokens(d.today_tokens) : '暂不可用';
   $('#token-detail').textContent = d.logs_available
-    ? '入 ' + formatTokens(d.today_input) + ' / 出 ' + formatTokens(d.today_output)
+    ? formatTokens(d.today_input) + ' / ' + formatTokens(d.today_output)
     : '额度信息仍可正常查看';
   $('#quota-percent').textContent = d.percent.toFixed(1) + '%';
-  $('#progress-fill').style.width = Math.min(d.percent, 100).toFixed(1) + '%';
-  $('#quota-remaining').textContent = '🟢 剩余 ¥' + d.remaining.toFixed(2);
-  $('#quota-total').textContent = '总额 ¥' + d.total.toFixed(2);
-  $('#quota-used').textContent = '已使用 ¥' + d.used.toFixed(2);
+  const percent = Math.min(Math.max(d.percent, 0), 100);
+  $('#progress-fill').style.width = percent.toFixed(1) + '%';
+  $('.progress-bar').setAttribute('aria-valuenow', percent.toFixed(1));
+  $('#quota-remaining').textContent = '剩余 ¥' + d.remaining.toFixed(2);
+  $('#quota-total').textContent = 'TOTAL ¥' + d.total.toFixed(2);
+  $('#quota-used').textContent = 'USED ¥' + d.used.toFixed(2);
   markUpdated();
 }
 
@@ -232,7 +238,7 @@ async function init() {
       await loadDashboard();
     } else {
       if (!cfg.has_cookie) { /* 首次使用 */ }
-      else if (cfg.expired) { showConfigError('Cookie 已过期 (超过 24 小时), 请重新获取'); }
+      else if (cfg.expired) { showConfigError('Cookie 已过期（超过 15 天），请重新获取'); }
       showScreen('config');
     }
   } catch (e) {

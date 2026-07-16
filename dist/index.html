@@ -7,105 +7,98 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- ═══ 配置页 ═══ -->
-  <div id="config-screen" class="screen">
-    <div class="config-card">
-      <h1 class="title">AMAX Dashboard</h1>
-      <p class="subtitle">请填写认证信息</p>
+  <section id="config-screen" class="screen config-screen" aria-labelledby="config-title">
+    <main class="config-shell">
+      <header class="access-header">
+        <p class="product-mark">AMAX / ACCESS</p>
+        <h1 id="config-title">连接你的 AMAX 账户</h1>
+        <p class="access-intro">凭据只保存在当前 Windows 用户的本地应用数据中。</p>
+      </header>
 
-      <div class="form-group">
-        <label>Session Cookie</label>
-        <input type="password" id="cookie-input" placeholder="session=MTc4MzQyOTkyN3xE..." autocomplete="off" />
-        <span class="hint">
-          1. 打开 <a href="https://ai.amaxsmp.com/dashboard" target="_blank">ai.amaxsmp.com/dashboard</a> 并登录<br/>
-          2. 按 F12 → Application → Cookies → 找到 session<br/>
-          3. 双击 Value 列全选 → Ctrl+C 复制<br/>
-          4. 完整值以 <code>session=</code> 开头, 长度约 300+ 字符
-        </span>
-      </div>
+      <form class="config-form" novalidate>
+        <div class="form-group">
+          <label for="cookie-input">Session Cookie</label>
+          <input type="password" id="cookie-input" placeholder="session=MTc4MzQyOTkyN3xE..." autocomplete="off" />
+          <ol class="access-steps">
+            <li>登录 <a href="https://ai.amaxsmp.com/dashboard" target="_blank" rel="noreferrer">AMAX Dashboard</a></li>
+            <li>按 F12，打开 Application → Cookies</li>
+            <li>找到 session，复制完整 Value</li>
+          </ol>
+        </div>
 
-      <div class="form-group">
-        <label>API Key <small>(可选)</small></label>
-        <input type="password" id="apikey-input" placeholder="sk-..." autocomplete="off" />
-        <span class="hint">用于获取今日消耗详情, 不填则只显示额度信息</span>
-      </div>
+        <div class="form-group optional-field">
+          <div class="label-row">
+            <label for="apikey-input">API Key</label>
+            <span>可选</span>
+          </div>
+          <input type="password" id="apikey-input" placeholder="sk-..." autocomplete="off" />
+          <p class="hint">兼容配置，当前账户汇总无需填写</p>
+        </div>
 
-      <div id="config-status" class="status hidden"></div>
+        <div id="config-status" class="status hidden" role="status" aria-live="polite"></div>
+        <button id="save-btn" type="button" class="btn primary">保存并验证</button>
+      </form>
+    </main>
+  </section>
 
-      <button id="save-btn" class="btn primary full">💾 保存并登录</button>
-    </div>
-  </div>
-
-  <!-- ═══ 看板页 ═══ -->
-  <div id="dashboard-screen" class="screen hidden">
+  <section id="dashboard-screen" class="screen hidden" aria-labelledby="dashboard-title">
     <header class="topbar">
-      <h2>AMAX Dashboard</h2>
+      <p id="dashboard-title" class="product-mark">AMAX / DAILY</p>
       <div class="topbar-actions">
-        <span id="last-updated" class="update-time"></span>
-        <button id="refresh-btn" class="btn icon" title="刷新数据" aria-label="刷新数据">↻</button>
-        <button id="settings-btn" class="btn icon" title="设置" aria-label="设置">⚙</button>
+        <span class="sync-state"><span class="sync-dot" aria-hidden="true"></span><span id="last-updated">等待同步</span></span>
+        <button id="refresh-btn" class="btn icon" title="刷新数据" aria-label="刷新数据">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" /></svg>
+        </button>
+        <button id="settings-btn" class="btn icon" title="设置" aria-label="设置">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6l-.05.08H9.95L9.9 20a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1l-.08-.05V9.95L4 9.9a1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6l.05-.08h3.99l.05.08a1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.08.38.3.74.6 1l.08.05v3.99L20 14c-.3.26-.52.62-.6 1Z" /></svg>
+        </button>
       </div>
     </header>
 
     <main class="content">
-      <!-- 骨架屏 -->
-      <div id="skeleton" class="hidden">
-        <div class="sk-row"><div class="sk-line w60"></div><div class="sk-line w30"></div></div>
-        <div class="sk-card-row">
-          <div class="sk-card"><div class="sk-line w40"></div><div class="sk-line w80 sk-h-lg"></div><div class="sk-line w50"></div></div>
-          <div class="sk-card"><div class="sk-line w40"></div><div class="sk-line w80 sk-h-lg"></div><div class="sk-line w50"></div></div>
-        </div>
-        <div class="sk-card sk-card-lg">
-          <div class="sk-line w30"></div>
-          <div class="sk-row"><div class="sk-line w25 sk-h-xl"></div></div>
-          <div class="sk-bar"></div>
-          <div class="sk-row"><div class="sk-line w40"></div><div class="sk-line w30"></div></div>
-        </div>
+      <div id="error-msg" class="error-strip hidden" role="alert"></div>
+
+      <div id="skeleton" class="skeleton hidden" aria-label="正在加载数据">
+        <div class="sk-line sk-user"></div><div class="sk-line sk-meta"></div>
+        <div class="sk-line sk-money"></div>
+        <div class="sk-metrics"><div class="sk-line"></div><div class="sk-line"></div></div>
+        <div class="sk-quota"><div class="sk-line"></div><div class="sk-bar"></div></div>
       </div>
 
-      <!-- 错误 -->
-      <div id="error-msg" class="center hidden"></div>
+      <article id="dashboard-data" class="dashboard-data hidden">
+        <header class="account-header">
+          <h1 id="user-name"></h1>
+          <p id="user-requests"></p>
+        </header>
 
-      <!-- 看板数据 -->
-      <div id="dashboard-data" class="hidden">
-        <div class="user-row">
-          <span id="user-name" class="user-name"></span>
-          <span id="user-requests" class="user-meta"></span>
-        </div>
+        <section class="cost-block" aria-labelledby="cost-label">
+          <p id="cost-label" class="telemetry-label">COST TODAY</p>
+          <p id="today-yuan" class="primary-value"></p>
+          <p id="log-count" class="metric-note"></p>
+        </section>
 
-        <div class="card-row">
-          <div class="metric-card">
-            <div class="metric-label">💰 今天消耗</div>
-            <div id="today-yuan" class="metric-value orange"></div>
-            <div id="log-count" class="metric-sub"></div>
+        <section class="token-grid" aria-label="Token 用量">
+          <div class="token-metric">
+            <p class="telemetry-label">TOKENS</p>
+            <p id="today-tokens" class="secondary-value"></p>
           </div>
-          <div class="metric-card">
-            <div class="metric-label">📊 Token 消耗</div>
-            <div id="today-tokens" class="metric-value cyan"></div>
-            <div id="token-detail" class="metric-sub"></div>
+          <div class="token-metric token-io">
+            <p class="telemetry-label">INPUT / OUTPUT</p>
+            <p id="token-detail" class="secondary-value"></p>
           </div>
-        </div>
+        </section>
 
-        <div class="quota-card">
-          <div class="quota-label">💳 额度概况</div>
-          <div class="quota-percent-row">
-            <span id="quota-percent" class="quota-percent"></span>
-            <span class="quota-label-sm">剩余可用</span>
+        <section class="quota-block" aria-labelledby="quota-label">
+          <div class="quota-heading">
+            <div><p id="quota-label" class="telemetry-label">AVAILABLE QUOTA</p><p id="quota-percent" class="quota-percent"></p></div>
+            <p id="quota-remaining" class="quota-remaining"></p>
           </div>
-          <div class="progress-bar">
-            <div id="progress-fill" class="progress-fill"></div>
-          </div>
-          <div class="quota-detail">
-            <span id="quota-remaining"></span>
-            <span id="quota-total"></span>
-          </div>
-          <div id="quota-used" class="quota-used"></div>
-        </div>
-
-      </div>
+          <div class="progress-bar" role="progressbar" aria-label="剩余额度比例" aria-valuemin="0" aria-valuemax="100"><div id="progress-fill" class="progress-fill"></div></div>
+          <div class="quota-detail"><span id="quota-used"></span><span id="quota-total"></span></div>
+        </section>
+      </article>
     </main>
-  </div>
-
+  </section>
   <script src="app.js"></script>
 </body>
 </html>
