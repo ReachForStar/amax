@@ -7,15 +7,18 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <section id="config-screen" class="screen config-screen" aria-labelledby="config-title">
+  <section id="config-screen" class="screen config-screen" aria-labelledby="config-title" aria-hidden="false">
     <main class="config-shell">
       <header class="access-header">
-        <p class="product-mark">AMAX / ACCESS</p>
+        <div class="access-nav">
+          <p class="product-mark">AMAX / ACCESS</p>
+          <button id="back-btn" type="button" class="btn secondary hidden" aria-label="返回看板">返回看板</button>
+        </div>
         <h1 id="config-title">连接你的 AMAX 账户</h1>
         <p class="access-intro">凭据只保存在当前 Windows 用户的本地应用数据中。</p>
       </header>
 
-      <form class="config-form" novalidate>
+      <form id="config-form" class="config-form" novalidate aria-busy="false">
         <div class="form-group">
           <label for="cookie-input">Session Cookie</label>
           <input type="password" id="cookie-input" placeholder="session=MTc4MzQyOTkyN3xE..." autocomplete="off" />
@@ -36,12 +39,12 @@
         </div>
 
         <div id="config-status" class="status hidden" role="status" aria-live="polite"></div>
-        <button id="save-btn" type="button" class="btn primary">保存并验证</button>
+        <button id="save-btn" type="submit" class="btn primary">保存并验证</button>
       </form>
     </main>
   </section>
 
-  <section id="dashboard-screen" class="screen hidden" aria-labelledby="dashboard-title">
+  <section id="dashboard-screen" class="screen hidden" aria-labelledby="dashboard-title" aria-hidden="true">
     <header class="topbar">
       <p id="dashboard-title" class="product-mark">AMAX / DAILY</p>
       <div class="topbar-actions">
