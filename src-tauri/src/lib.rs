@@ -200,13 +200,16 @@ async fn refresh_and_notify(app: &tauri::AppHandle) {
     }
 }
 
+/// 后台自动刷新间隔：10 分钟
+const AUTO_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
 fn start_auto_refresh(app: &tauri::AppHandle) {
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+        tokio::time::sleep(AUTO_REFRESH_INTERVAL).await;
         loop {
             refresh_and_notify(&app_handle).await;
-            tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+            tokio::time::sleep(AUTO_REFRESH_INTERVAL).await;
         }
     });
 }
