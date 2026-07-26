@@ -1,0 +1,51 @@
+# Release 工作流：推送 v* 标签时在 Windows 上构建 MSI 并发布到 GitHub Release。
+# workflow_dispatch 用于手动验证构建链路（不创建 Release）。
+#
+# 说明：
+# - 应用依赖 Windows DPAPI / windows-sys，仅 windows-latest 可构建，产物为 MSI。
+# - wix 配置了 zh-CN / en-US 两种语言，会各生成一个 MSI，glob 一并上传。
+# - 构建产物位于工作区根 target/（Cargo workspace 根在仓库根目录）。
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Windows MSI
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --locked --version "^2"
+
+      - name: Build Tauri app
+        run: cargo tauri build
+
+      - name: List bundle output
+        if: always()
+        shell: pwsh
+        run: Get-ChildItem -Recurse target\release\bundle -ErrorAction SilentlyContinue | Select-Object FullName
+
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/bundle/msi/*.msi
+          generate_release_notes: true
+          draft: false
+          prerelease: false
