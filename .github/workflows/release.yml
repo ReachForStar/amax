@@ -5,6 +5,7 @@
 # - 应用依赖 Windows DPAPI / windows-sys，仅 windows-latest 可构建，产物为 MSI。
 # - wix 配置了 zh-CN / en-US 两种语言，会各生成一个 MSI，glob 一并上传。
 # - 构建产物位于工作区根 target/（Cargo workspace 根在仓库根目录）。
+# - Release Notes 取自 CHANGELOG.md 中与标签同版本的小节（发布前须先补充该小节），缺失时回退为提交列表。
 name: Release
 
 on:
@@ -40,12 +41,37 @@ jobs:
         shell: pwsh
         run: Get-ChildItem -Recurse target\release\bundle -ErrorAction SilentlyContinue | Select-Object FullName
 
+      - name: Extract release notes
+        if: startsWith(github.ref, 'refs/tags/')
+        id: release_notes
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $body = ""
+          if (Test-Path CHANGELOG.md) {
+            $content = Get-Content CHANGELOG.md -Raw -Encoding utf8
+            $pattern = "(?ms)^## \[$([regex]::Escape($version))\][^\r\n]*\r?\n(.*?)(?=^## \[|\z)"
+            $m = [regex]::Match($content, $pattern)
+            if ($m.Success) { $body = $m.Groups[1].Value.Trim() }
+          }
+          if (-not $body) {
+            # CHANGELOG.md 缺少对应小节时回退为上一标签以来的提交列表
+            $prev = git describe --tags --abbrev=0 "$tag^" 2>$null
+            $range = if ($prev) { "$prev..$tag" } else { $tag }
+            $commits = git log $range --pretty=format:"- %s"
+            $body = "## 修改说明`n`n" + ($commits -join "`n")
+          }
+          "body<<NOTES_EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $body | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "NOTES_EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Create Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
             target/release/bundle/msi/*.msi
-          generate_release_notes: true
+          body: ${{ steps.release_notes.outputs.body }}
           draft: false
           prerelease: false
