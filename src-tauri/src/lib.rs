@@ -27,7 +27,6 @@ fn get_config(state: tauri::State<AppState>) -> Result<serde_json::Value, String
     Ok(serde_json::json!({
         "has_cookie": db.has_cookie(),
         "has_api_key": db.has_api_key(),
-        "expired": db.is_cookie_expired(),
     }))
 }
 

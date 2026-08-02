@@ -297,11 +297,10 @@ async function init() {
     canReturnToDashboard = false;
     backBtn.classList.add('hidden');
     hasSavedCookie = cfg.has_cookie;
-    if (cfg.has_cookie && !cfg.expired) {
+    if (cfg.has_cookie) {
       await loadDashboard();
     } else {
-      if (!cfg.has_cookie) { /* 首次使用 */ }
-      else if (cfg.expired) { showConfigError('Cookie 已过期（超过 15 天），请重新获取'); }
+      /* 首次使用 */
       showScreen('config');
     }
   } catch (e) {

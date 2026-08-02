@@ -65,7 +65,7 @@ cargo tauri build
 - Token 使用 `summary.total_tokens/input_tokens/output_tokens`；费用使用 `summary.quota / QUOTA_PER_YUAN`，其中 `QUOTA_PER_YUAN = 500_000`。
 - 日志汇总失败时仍返回账户额度，不能把额度和日志查询改成全有或全无。
 
-`src-tauri/src/db.rs` 管理应用数据目录中的 SQLite：`config` 保存认证信息，`dashboard_snapshot` 保存刷新快照并清理 90 天前记录。Cookie 保存后固定 15 天过期；缺失或无法解析 `cookie_saved_at` 时也视为过期。
+`src-tauri/src/db.rs` 管理应用数据目录中的 SQLite：`config` 保存认证信息，`dashboard_snapshot` 保存刷新快照并清理 90 天前记录。Cookie 保存后不设本地过期时间，实际失效由服务端判定（API 返回认证错误时前端回退配置页）。
 
 `src-tauri/src/crypto.rs` 使用 Windows DPAPI 将 Cookie/API Key 绑定当前用户和机器，加密结果以 `dpapi:v1:<hex>` 存入 SQLite。`Db::get_cookie` / `get_api_key` 仍兼容旧明文记录；调整持久化格式时必须保留迁移路径。非 Windows 构建不提供不安全的明文加密降级。
 
