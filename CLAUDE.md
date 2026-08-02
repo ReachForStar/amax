@@ -45,6 +45,8 @@ cargo tauri build
 - `get_config`：读取认证配置和 Cookie 过期状态。
 - `save_config`：保存 Cookie 和可选 API Key。
 - `fetch_dashboard`：刷新数据、保存快照并更新托盘。
+- `get_local_stats`：按起止日期查询每日快照（日末条），返回余额、本地估算值与每日新增请求数（累计差分）。
+- `fetch_usage_stats`：按起止日期调用官网聚合，返回补零后的每日消耗、模型分布与区间汇总。
 
 后端通过 `dashboard-updated` 事件推送后台刷新结果。新增或重命名 command/event 时，需要同步修改 `src-tauri/src/lib.rs` 和 `dist/app.js`。
 
@@ -62,10 +64,11 @@ cargo tauri build
 
 - `/api/user/self` 提供账户额度、用户 ID 和累计请求数。
 - `/v1/logs/token-usage/by-model` 按本地时区当天的 Unix 时间范围及 `status=success` 返回官网同口径的 Token/费用汇总；请求必须携带字符串形式的 `user_id`。
+- by-model 响应除 `summary` 外还含 `models`（模型名、`request_count`、Token 明细、`quota`）与 `daily`（日 × 模型明细，`date` 为本地时区 0 点 Unix 时间戳，无使用量的日期无记录）；`fetch_usage_stats` 按日聚合补零、派生区间汇总，`quota` 全 0 时模型占比自动切换 `total_tokens` 口径（`percent_basis`）。
 - Token 使用 `summary.total_tokens/input_tokens/output_tokens`；费用使用 `summary.quota / QUOTA_PER_YUAN`，其中 `QUOTA_PER_YUAN = 500_000`。
 - 日志汇总失败时仍返回账户额度，不能把额度和日志查询改成全有或全无。
 
-`src-tauri/src/db.rs` 管理应用数据目录中的 SQLite：`config` 保存认证信息，`dashboard_snapshot` 保存刷新快照并清理 90 天前记录。Cookie 保存后不设本地过期时间，实际失效由服务端判定（API 返回认证错误时前端回退配置页）。
+`src-tauri/src/db.rs` 管理应用数据目录中的 SQLite：`config` 保存认证信息，`dashboard_snapshot` 保存刷新快照（含 `request_count` 累计值，`Db::open` 对旧库幂等 `ALTER TABLE ADD COLUMN` 迁移），快照永久保留、不清理。Cookie 保存后不设本地过期时间，实际失效由服务端判定（API 返回认证错误时前端回退配置页）。
 
 `src-tauri/src/crypto.rs` 使用 Windows DPAPI 将 Cookie/API Key 绑定当前用户和机器，加密结果以 `dpapi:v1:<hex>` 存入 SQLite。`Db::get_cookie` / `get_api_key` 仍兼容旧明文记录；调整持久化格式时必须保留迁移路径。非 Windows 构建不提供不安全的明文加密降级。
 
@@ -81,3 +84,5 @@ cargo tauri build
 启动后，前端调用 `get_config`：有效 Cookie 进入看板并调用 `fetch_dashboard`，否则显示配置页。`loadDashboard` 合并并发刷新请求；成功后 `renderDashboard` 更新数据与更新时间，认证错误返回配置页，其他错误保留已有数据并显示重试信息。后台定时刷新走相同 Rust 聚合路径，通过事件更新前端。前端 JS 同时兼容 `window.__TAURI__.core.invoke`、`window.__TAURI_INTERNALS__.invoke` 和旧版 `window.__TAURI__.invoke`；调整 IPC 封装时不要删掉兼容分支。
 
 真实认证数据只存放在用户应用数据目录的 SQLite 中。运行数据请求依赖有效 Session Cookie；API Key 当前仅作为兼容配置保留，不参与官网账户级聚合。没有凭据时仍可验证配置页、窗口和托盘生命周期。
+
+统计页经看板顶栏图表按钮进入：区间选择器（预设 7/14/30 天 + 自定义起止日期，跨度上限 1096 天）驱动 `fetch_usage_stats`（官方主源）与 `get_local_stats`（余额、请求数、对比与降级数据）并行调用；官方失败时趋势与汇总回退本地估算并标注，模型分布仅官方可用；消耗趋势图可叠加本地对比数据集（默认隐藏）；导出按钮将当前区间数据输出为 CSV / JSON / XLSX（Chart.js 与 SheetJS 以 UMD 单文件存放于 `dist/vendor/`）。
