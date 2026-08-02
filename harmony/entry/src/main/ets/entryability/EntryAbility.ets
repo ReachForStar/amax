@@ -16,28 +16,62 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
+import { initStore, getCookie } from '../model/Store';
+import { BreakpointSystem } from '../common/BreakpointSystem';
 
 const DOMAIN = 0x0000;
 
 export default class EntryAbility extends UIAbility {
-  onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): void {
+  private breakpointSystem: BreakpointSystem = new BreakpointSystem();
+  // Store 初始化承诺：onCreate 发起，onWindowStageCreate 等待完成后再读凭据，规避初始页路由竞态
+  private storeReady: Promise<void> | null = null;
+
+  async onCreate(want: Want, launchParam: AbilityConstant.LaunchParam): Promise<void> {
     try {
       this.context.getApplicationContext().setColorMode(ConfigurationConstant.ColorMode.COLOR_MODE_NOT_SET);
     } catch (err) {
       hilog.error(DOMAIN, 'testTag', 'Failed to set colorMode. Cause: %{public}s', JSON.stringify(err));
     }
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onCreate');
+    // 初始化本地存储（preferences + RDB）；失败在下方与 onWindowStageCreate 等待处记录
+    this.storeReady = initStore(this.context);
+    try {
+      await this.storeReady;
+    } catch (err) {
+      hilog.error(DOMAIN, 'testTag', 'Failed to init store. Cause: %{public}s', JSON.stringify(err));
+    }
   }
 
   onDestroy(): void {
+    this.breakpointSystem.unregister();
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
 
-  onWindowStageCreate(windowStage: window.WindowStage): void {
+  async onWindowStageCreate(windowStage: window.WindowStage): Promise<void> {
     // Main window is created, set main page for this ability
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onWindowStageCreate');
 
-    windowStage.loadContent('pages/Index', (err) => {
+    // 等待 Store 就绪：未初始化即读凭据会抛"Store 未初始化"，导致有凭据也误进配置页
+    try {
+      await this.storeReady;
+    } catch (err) {
+      hilog.error(DOMAIN, 'testTag', 'Store not ready, fallback to ConfigPage. Cause: %{public}s',
+        JSON.stringify(err));
+    }
+
+    const mainWindow = await windowStage.getMainWindow();
+    this.breakpointSystem.register(mainWindow.getUIContext());
+
+    // getCookie 在密文损坏时会 reject（decryptSecret 抛错）：兜底 hasCookie=false 进配置页
+    let hasCookie = false;
+    try {
+      hasCookie = (await getCookie()) !== null;
+    } catch (err) {
+      hilog.error(DOMAIN, 'testTag', 'Failed to read cookie, fallback to ConfigPage. Cause: %{public}s',
+        JSON.stringify(err));
+    }
+
+    windowStage.loadContent(hasCookie ? 'pages/DashboardPage' : 'pages/ConfigPage', (err) => {
       if (err.code) {
         hilog.error(DOMAIN, 'testTag', 'Failed to load the content. Cause: %{public}s', JSON.stringify(err));
         return;
