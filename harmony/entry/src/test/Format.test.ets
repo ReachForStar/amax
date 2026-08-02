@@ -1,5 +1,11 @@
 import { describe, it, expect } from '@ohos/hypium';
-import { formatTokens, formatYuan, parseSessionCookie, classifyHttpError } from '../main/ets/common/Format';
+import {
+  formatTokens,
+  formatYuan,
+  parseSessionCookie,
+  classifyHttpError,
+  ApiError
+} from '../main/ets/common/Format';
 
 export default function formatTest() {
   describe('formatTest', () => {
@@ -33,6 +39,17 @@ export default function formatTest() {
       expect(classifyHttpError(403)).assertEqual('Cookie 无效或已过期，请重新登录');
       expect(classifyHttpError(429)).assertEqual('请求过于频繁，请稍后重试');
       expect(classifyHttpError(500)).assertEqual('服务异常（HTTP 500）');
+    });
+    it('apiError_is_error_with_message', 0, () => {
+      const error = new ApiError('msg');
+      expect(error instanceof Error).assertTrue();
+      expect(error.message).assertEqual('msg');
+    });
+    it('apiError_auth_flag_default_false', 0, () => {
+      expect(new ApiError('msg').isAuthError).assertFalse();
+    });
+    it('apiError_auth_flag_explicit_true', 0, () => {
+      expect(new ApiError('msg', true).isAuthError).assertTrue();
     });
   });
 }
