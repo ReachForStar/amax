@@ -30,6 +30,22 @@ const saveBtn = $('#save-btn');
 const configForm = $('#config-form');
 const backBtn = $('#back-btn');
 const settingsBtn = $('#settings-btn');
+const statsScreen = $('#stats-screen');
+const statsBtn = $('#stats-btn');
+const statsBackBtn = $('#stats-back-btn');
+const rangeStartInput = $('#range-start');
+const rangeEndInput = $('#range-end');
+const rangeErrorEl = $('#range-error');
+const summaryTitleEl = $('#summary-title');
+const trendNoteEl = $('#trend-note');
+const trendErrorEl = $('#trend-error');
+const modelErrorEl = $('#model-error');
+const modelBasisNoteEl = $('#model-basis-note');
+const modelListEl = $('#model-list');
+const remainingBlock = $('#remaining-block');
+const exportCsvBtn = $('#export-csv-btn');
+const exportJsonBtn = $('#export-json-btn');
+const exportXlsxBtn = $('#export-xlsx-btn');
 
 let hasDashboardData = false;
 let hasSavedCookie = false;
@@ -52,12 +68,13 @@ function getErrorMessage(error) {
   return error?.message || error?.toString?.() || '未知错误';
 }
 
+const screenRegistry = { config: configScreen, dashboard: dashboardScreen, stats: statsScreen };
 function showScreen(screen) {
-  const showingConfig = screen === 'config';
-  configScreen.classList.toggle('hidden', !showingConfig);
-  configScreen.setAttribute('aria-hidden', String(!showingConfig));
-  dashboardScreen.classList.toggle('hidden', showingConfig);
-  dashboardScreen.setAttribute('aria-hidden', String(showingConfig));
+  for (const [name, el] of Object.entries(screenRegistry)) {
+    const hidden = name !== screen;
+    el.classList.toggle('hidden', hidden);
+    el.setAttribute('aria-hidden', String(hidden));
+  }
 }
 
 function setConfigBusy(isBusy) {
@@ -134,6 +151,20 @@ function showConfigError(msg) {
   configStatus.textContent = msg;
   configStatus.classList.remove('hidden');
 }
+
+function toDateStr(date) {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+}
+function todayStr() { return toDateStr(new Date()); }
+function daysAgoStr(days) {
+  const date = new Date();
+  date.setDate(date.getDate() - (days - 1)); // 含当日，7 天即今天往前 6 天
+  return toDateStr(date);
+}
+function isAuthErrorMessage(msg) { return msg.includes('认证失败'); }
 
 // ═══ 配置页 ═══
 configForm.addEventListener('submit', async (event) => {
@@ -281,6 +312,262 @@ async function setupEventListener() {
     console.error('监听后台刷新事件失败:', e);
   }
 }
+
+// ═══ 统计页 ═══
+const statsCharts = { trend: null, requests: null, model: null, remaining: null };
+let statsUsage = null;   // fetch_usage_stats 结果
+let statsLocal = null;   // get_local_stats 结果
+let statsSource = 'official'; // 'official' | 'local_estimate'
+let statsRange = null;   // { start_date, end_date }
+
+function chartTheme() {
+  return {
+    font: { family: '"Cascadia Mono", "SFMono-Regular", Consolas, monospace', size: 10 },
+    muted: '#5a6460',
+    grid: 'rgba(190, 201, 193, .5)',
+    accent: '#2c6b4b',
+  };
+}
+
+function destroyStatsCharts() {
+  for (const key of Object.keys(statsCharts)) {
+    if (statsCharts[key]) { statsCharts[key].destroy(); statsCharts[key] = null; }
+  }
+}
+
+function showRangeError(msg) { rangeErrorEl.textContent = msg; rangeErrorEl.classList.remove('hidden'); }
+function hideRangeError() { rangeErrorEl.classList.add('hidden'); }
+function showBlockError(el, msg) { el.textContent = msg; el.classList.remove('hidden'); }
+function hideBlockError(el) { el.classList.add('hidden'); }
+
+function setActivePreset(daysOrNull) {
+  document.querySelectorAll('.range-preset').forEach((btn) => {
+    btn.classList.toggle('is-active', daysOrNull !== null && Number(btn.dataset.days) === daysOrNull);
+  });
+}
+
+function syncRangeInputs() {
+  const today = todayStr();
+  rangeStartInput.max = today;
+  rangeEndInput.max = today;
+  rangeStartInput.value = statsRange.start_date;
+  rangeEndInput.value = statsRange.end_date;
+}
+
+async function enterStats() {
+  if (!statsRange) {
+    statsRange = { start_date: daysAgoStr(7), end_date: todayStr() };
+    setActivePreset(7);
+    syncRangeInputs();
+  }
+  showScreen('stats');
+  await loadStats();
+}
+
+function applyPreset(days) {
+  statsRange = { start_date: daysAgoStr(days), end_date: todayStr() };
+  setActivePreset(days);
+  syncRangeInputs();
+  hideRangeError();
+  loadStats();
+}
+
+function applyCustomRange() {
+  const start = rangeStartInput.value;
+  const end = rangeEndInput.value;
+  if (!start || !end) return;
+  setActivePreset(null);
+  if (start > end) { showRangeError('起始日期不能晚于结束日期'); return; }
+  if (end > todayStr()) { showRangeError('结束日期不能超过今天'); return; }
+  statsRange = { start_date: start, end_date: end };
+  hideRangeError();
+  loadStats();
+}
+
+statsBtn.addEventListener('click', enterStats);
+statsBackBtn.addEventListener('click', () => { showScreen('dashboard'); statsBtn.focus(); });
+document.querySelectorAll('.range-preset').forEach((btn) =>
+  btn.addEventListener('click', () => applyPreset(Number(btn.dataset.days))));
+rangeStartInput.addEventListener('change', applyCustomRange);
+rangeEndInput.addEventListener('change', applyCustomRange);
+
+async function loadStats() {
+  const [usageResult, localResult] = await Promise.allSettled([
+    invoke('fetch_usage_stats', statsRange),
+    invoke('get_local_stats', statsRange),
+  ]);
+
+  statsLocal = localResult.status === 'fulfilled' ? localResult.value : null;
+
+  if (usageResult.status === 'fulfilled') {
+    statsUsage = usageResult.value;
+    statsSource = 'official';
+    hideBlockError(trendErrorEl);
+    hideBlockError(modelErrorEl);
+    renderSummary(statsUsage.summary, 'official');
+    renderModelBlock(statsUsage);
+  } else {
+    statsUsage = null;
+    statsSource = 'local_estimate';
+    const msg = getErrorMessage(usageResult.reason);
+    const authHint = isAuthErrorMessage(msg) ? '，可前往设置页重新获取 Cookie' : '';
+    showBlockError(trendErrorEl, '官方数据获取失败：' + msg + authHint + '。趋势与汇总已切换为本地估算。');
+    showBlockError(modelErrorEl, '官方数据不可用：' + msg + authHint);
+    renderSummary(statsLocal ? statsLocal.summary : null, 'local_estimate');
+    renderModelBlock(null);
+  }
+
+  renderTrendChart();
+  renderRequestsChart();
+  renderRemainingChart();
+  updateExportButtons();
+}
+
+function renderSummary(summary, source) {
+  summaryTitleEl.textContent = source === 'local_estimate'
+    ? 'RANGE SUMMARY（本地估算）'
+    : 'RANGE SUMMARY';
+  const set = (id, text) => { $(id).textContent = text; };
+  if (!summary) {
+    ['#sum-total-yuan', '#sum-avg-yuan', '#sum-peak', '#sum-days', '#sum-requests']
+      .forEach((id) => set(id, '--'));
+    return;
+  }
+  set('#sum-total-yuan', '¥' + summary.total_yuan.toFixed(6));
+  set('#sum-avg-yuan', '¥' + summary.avg_yuan.toFixed(6));
+  set('#sum-peak', summary.peak_date
+    ? '¥' + summary.peak_yuan.toFixed(6) + '（' + summary.peak_date + '）'
+    : '--');
+  const days = source === 'official' ? summary.days_with_usage : summary.days_with_data;
+  set('#sum-days', String(days));
+  set('#sum-requests', summary.request_count != null ? String(summary.request_count) : '--');
+}
+
+function renderTrendChart() {
+  const theme = chartTheme();
+  if (statsCharts.trend) { statsCharts.trend.destroy(); statsCharts.trend = null; }
+
+  let labels = [];
+  let yuanData = [];
+  let tokensData = [];
+  let dashed = false;
+
+  if (statsUsage) {
+    labels = statsUsage.daily.map((d) => d.date);
+    yuanData = statsUsage.daily.map((d) => d.yuan);
+    tokensData = statsUsage.daily.map((d) => d.tokens);
+    trendNoteEl.textContent = '';
+  } else if (statsLocal && statsLocal.daily.length) {
+    labels = statsLocal.daily.map((d) => d.date);
+    yuanData = statsLocal.daily.map((d) => d.yuan);
+    tokensData = statsLocal.daily.map((d) => d.tokens);
+    dashed = true;
+    trendNoteEl.textContent = '本地估算（快照日末累计值）';
+  } else {
+    trendNoteEl.textContent = '暂无数据';
+  }
+
+  const datasets = [
+    { label: '费用 ¥', data: yuanData, yAxisID: 'yYuan', borderColor: theme.accent, borderDash: dashed ? [5, 4] : [], tension: .25, pointRadius: 2, fill: false },
+    { label: 'Tokens', data: tokensData, yAxisID: 'yTokens', borderColor: '#7a8a80', borderDash: dashed ? [5, 4] : [], tension: .25, pointRadius: 2, fill: false },
+  ];
+
+  // 官方模式下叠加本地对比数据集（默认隐藏，图例点击开启）
+  if (statsUsage && statsLocal && statsLocal.daily.length) {
+    const localByDate = new Map(statsLocal.daily.map((d) => [d.date, d]));
+    datasets.push({
+      label: '本地费用 ¥', data: labels.map((date) => localByDate.get(date)?.yuan ?? null),
+      yAxisID: 'yYuan', borderColor: 'rgba(44, 107, 75, .55)', borderDash: [3, 3],
+      tension: .25, pointRadius: 1, hidden: true, spanGaps: true,
+    });
+    datasets.push({
+      label: '本地 Tokens', data: labels.map((date) => localByDate.get(date)?.tokens ?? null),
+      yAxisID: 'yTokens', borderColor: 'rgba(122, 138, 128, .55)', borderDash: [3, 3],
+      tension: .25, pointRadius: 1, hidden: true, spanGaps: true,
+    });
+  }
+
+  statsCharts.trend = new Chart($('#trend-chart'), {
+    type: 'line',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      scales: {
+        x: { ticks: { color: theme.muted, font: theme.font, maxTicksLimit: 8, maxRotation: 0 }, grid: { color: theme.grid } },
+        yYuan: { position: 'left', ticks: { color: theme.muted, font: theme.font }, grid: { color: theme.grid }, title: { display: true, text: '¥', color: theme.muted, font: theme.font } },
+        yTokens: { position: 'right', ticks: { color: theme.muted, font: theme.font }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Tokens', color: theme.muted, font: theme.font } },
+      },
+      plugins: { legend: { labels: { color: theme.muted, font: theme.font, boxWidth: 14 } } },
+    },
+  });
+}
+
+const MODEL_PALETTE = ['#2c6b4b', '#7a8a80', '#b08d57', '#5a6460', '#a3544f', '#4f6d7a', '#8b3e3e', '#6b7d5e'];
+
+function renderModelBlock(usage) {
+  if (statsCharts.model) { statsCharts.model.destroy(); statsCharts.model = null; }
+  modelListEl.innerHTML = '';
+
+  if (!usage || !usage.models.length) {
+    modelBasisNoteEl.textContent = usage ? '暂无模型数据' : '';
+    return;
+  }
+
+  modelBasisNoteEl.textContent = usage.percent_basis === 'tokens'
+    ? '占比口径：Tokens（quota 全为 0）'
+    : '占比口径：quota';
+
+  const basisValue = (m) => (usage.percent_basis === 'tokens' ? m.tokens : m.yuan);
+
+  statsCharts.model = new Chart($('#model-chart'), {
+    type: 'doughnut',
+    data: {
+      labels: usage.models.map((m) => m.model),
+      datasets: [{
+        data: usage.models.map(basisValue),
+        backgroundColor: usage.models.map((_, i) => MODEL_PALETTE[i % MODEL_PALETTE.length]),
+        borderColor: '#e8ece8',
+        borderWidth: 1,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '62%',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const m = usage.models[item.dataIndex];
+              return `${m.model}: ${m.percent.toFixed(1)}%`;
+            },
+          },
+        },
+      },
+    },
+  });
+
+  usage.models.forEach((m) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'model-name';
+    name.textContent = m.model;
+    name.title = m.model;
+    const nums = document.createElement('span');
+    nums.className = 'model-nums';
+    nums.textContent = '¥' + m.yuan.toFixed(4) + ' / ' + m.percent.toFixed(1) + '% / ' + m.request_count + ' 次';
+    li.append(name, nums);
+    modelListEl.appendChild(li);
+  });
+}
+
+// 占位实现 — Task 7（本地数据渲染）与 Task 8（导出）替换
+function renderRequestsChart() {}
+function renderRemainingChart() {}
+function updateExportButtons() {}
 
 // ═══ 启动 ═══
 async function init() {
