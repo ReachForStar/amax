@@ -66,9 +66,9 @@ struct LoginPage {
         .width('100%')
         .layoutWeight(1)
         .onLoadIntercept((event) => {
-          // 每次 URL 加载前触发；捕获登录后到 /dashboard 的重定向
+          // 每次 URL 加载前触发（含 iframe 导航）；仅主框架到 /dashboard 的重定向视为登录成功
           const url = event.data.getRequestUrl();
-          if (!this.handled && url.startsWith(DASHBOARD_PREFIX)) {
+          if (!this.handled && event.data.isMainFrame() && url.startsWith(DASHBOARD_PREFIX)) {
             this.handled = true;
             this.onLoginSuccess(url);
           }

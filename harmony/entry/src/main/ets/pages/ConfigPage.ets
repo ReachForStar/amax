@@ -103,6 +103,7 @@ struct ConfigPage {
               .width('100%').height(44)
               .backgroundColor(Theme.surfaceRaised).fontColor(Theme.accent)
               .border({ width: 1, color: Theme.accent, radius: 4 })
+              .enabled(!this.busy)
               .onClick(() => this.relogin())
           }
 
