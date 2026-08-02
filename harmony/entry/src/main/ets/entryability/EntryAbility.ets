@@ -60,7 +60,6 @@ export default class EntryAbility extends UIAbility {
     }
 
     const mainWindow = await windowStage.getMainWindow();
-    this.breakpointSystem.register(mainWindow.getUIContext());
 
     // getCookie 在密文损坏时会 reject（decryptSecret 抛错）：兜底 hasCookie=false 进配置页
     let hasCookie = false;
@@ -77,6 +76,14 @@ export default class EntryAbility extends UIAbility {
         return;
       }
       hilog.info(DOMAIN, 'testTag', 'Succeeded in loading the content.');
+      // 断点注册须在窗口上屏后执行：onWindowStageCreate 内 matchMediaSync 因 UIContext 未就绪抛 1300002；
+      // 移入 loadContent 回调后窗口已显示，mediaquery 可用。仍兜底：失败默认 sm，不影响首屏渲染
+      try {
+        this.breakpointSystem.register(mainWindow.getUIContext());
+      } catch (regErr) {
+        hilog.error(DOMAIN, 'testTag', 'Breakpoint register failed, fallback to sm. Cause: %{public}s',
+          JSON.stringify(regErr));
+      }
     });
   }
 
