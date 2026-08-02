@@ -40,7 +40,7 @@ cargo tauri build
 
 ### 前后端边界
 
-`dist/index.html`、`dist/style.css`、`dist/app.js` 构成完整前端。`src-tauri/tauri.conf.json` 的 `frontendDist` 指向 `../dist`，静态文件无需打包即可被 Tauri 加载。前端通过 `window.__TAURI__` 调用三个 IPC command：
+`dist/index.html`、`dist/style.css`、`dist/app.js` 构成完整前端。`src-tauri/tauri.conf.json` 的 `frontendDist` 指向 `../dist`，静态文件无需打包即可被 Tauri 加载。前端通过 `window.__TAURI__` 调用五个 IPC command：
 
 - `get_config`：读取认证配置和 Cookie 过期状态。
 - `save_config`：保存 Cookie 和可选 API Key。
