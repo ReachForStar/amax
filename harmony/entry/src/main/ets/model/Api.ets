@@ -88,7 +88,13 @@ export async function fetchDashboard(cookie: string): Promise<DashboardData> {
     throw new ApiError(classifyHttpError(userResp.responseCode),
       userResp.responseCode === 401 || userResp.responseCode === 403);
   }
-  const user = (parseBody<{ data: UserInfo }>(userResp)).data;
+  // HTTP 200 但响应体非 JSON 时 parseBody 抛原生 SyntaxError，统一收敛为 ApiError（对齐桌面版"数据解析失败"）
+  let user: UserInfo;
+  try {
+    user = (parseBody<{ data: UserInfo }>(userResp)).data;
+  } catch (error) {
+    throw new ApiError('数据解析失败');
+  }
   const totalQuota = user.quota + user.used_quota;
   const remaining = user.quota / QUOTA_PER_YUAN;
   const used = user.used_quota / QUOTA_PER_YUAN;
@@ -119,7 +125,9 @@ export async function fetchDashboard(cookie: string): Promise<DashboardData> {
       console.error(`日志汇总异常：HTTP ${logsResp.responseCode}，保留账户额度数据`);
     }
   } catch (error) {
-    console.error(`日志汇总失败，保留账户额度数据：${JSON.stringify(error)}`);
+    // Error 实例 JSON.stringify 得 {}，取 message 才能保留失败原因
+    const reason = error instanceof Error ? error.message : JSON.stringify(error);
+    console.error(`日志汇总失败，保留账户额度数据：${reason}`);
   }
 
   return {
