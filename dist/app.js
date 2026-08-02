@@ -385,7 +385,11 @@ function applyCustomRange() {
 }
 
 statsBtn.addEventListener('click', enterStats);
-statsBackBtn.addEventListener('click', () => { showScreen('dashboard'); statsBtn.focus(); });
+statsBackBtn.addEventListener('click', () => {
+  destroyStatsCharts();
+  showScreen('dashboard');
+  statsBtn.focus();
+});
 document.querySelectorAll('.range-preset').forEach((btn) =>
   btn.addEventListener('click', () => applyPreset(Number(btn.dataset.days))));
 rangeStartInput.addEventListener('change', applyCustomRange);
@@ -564,9 +568,83 @@ function renderModelBlock(usage) {
   });
 }
 
-// 占位实现 — Task 7（本地数据渲染）与 Task 8（导出）替换
-function renderRequestsChart() {}
-function renderRemainingChart() {}
+function renderRequestsChart() {
+  const theme = chartTheme();
+  if (statsCharts.requests) { statsCharts.requests.destroy(); statsCharts.requests = null; }
+
+  const rows = (statsLocal && statsLocal.daily) || [];
+  // 无任何有效差分（全为 null，如全新安装或老数据）时整块隐藏
+  const block = $('#requests-chart').closest('.stats-block');
+  if (!rows.some((d) => d.new_requests != null)) {
+    block.classList.add('hidden');
+    return;
+  }
+  block.classList.remove('hidden');
+
+  statsCharts.requests = new Chart($('#requests-chart'), {
+    type: 'line',
+    data: {
+      labels: rows.map((d) => d.date),
+      datasets: [{
+        label: '新增请求数',
+        data: rows.map((d) => d.new_requests), // null 点自动留空
+        borderColor: theme.accent,
+        tension: .25,
+        pointRadius: 2,
+        fill: false,
+        spanGaps: false, // 缺档日断开，避免误导
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: theme.muted, font: theme.font, maxTicksLimit: 8, maxRotation: 0 }, grid: { color: theme.grid } },
+        y: { beginAtZero: true, ticks: { color: theme.muted, font: theme.font, precision: 0 }, grid: { color: theme.grid } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+function renderRemainingChart() {
+  const theme = chartTheme();
+  if (statsCharts.remaining) { statsCharts.remaining.destroy(); statsCharts.remaining = null; }
+
+  const rows = (statsLocal && statsLocal.daily) || [];
+  if (!rows.length) {
+    remainingBlock.classList.add('hidden');
+    return;
+  }
+  remainingBlock.classList.remove('hidden');
+
+  statsCharts.remaining = new Chart($('#remaining-chart'), {
+    type: 'line',
+    data: {
+      labels: rows.map((d) => d.date),
+      datasets: [{
+        label: '剩余额度 ¥',
+        data: rows.map((d) => d.remaining),
+        borderColor: '#b08d57',
+        tension: .25,
+        pointRadius: 2,
+        fill: false,
+        spanGaps: true, // 余额为状态量，缺口连接
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      scales: {
+        x: { ticks: { color: theme.muted, font: theme.font, maxTicksLimit: 8, maxRotation: 0 }, grid: { color: theme.grid } },
+        y: { ticks: { color: theme.muted, font: theme.font }, grid: { color: theme.grid } },
+      },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+// 占位实现 — Task 8（导出）替换
 function updateExportButtons() {}
 
 // ═══ 启动 ═══
