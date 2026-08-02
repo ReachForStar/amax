@@ -148,8 +148,7 @@ impl Db {
         Ok(())
     }
 
-    /// 按日取区间内每天的末条快照；统计页任务消费，当前尚无调用方
-    #[allow(dead_code)]
+    /// 按日取区间内每天的末条快照
     pub fn get_daily_snapshots(
         &self,
         start_date: &str,
@@ -177,7 +176,6 @@ impl Db {
 
 /// 每日快照行 — 取当日最后一条
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 pub struct DailySnapshot {
     pub date: String,
     pub yuan: f64,
@@ -187,7 +185,6 @@ pub struct DailySnapshot {
 }
 
 /// 每日新增请求数：仅相邻两日且双方累计值非 NULL 时产出，其余留空
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 pub fn derive_daily_requests(snapshots: &[DailySnapshot]) -> Vec<Option<i64>> {
     snapshots
         .iter()
@@ -204,7 +201,6 @@ pub fn derive_daily_requests(snapshots: &[DailySnapshot]) -> Vec<Option<i64>> {
 }
 
 /// 本地汇总派生：(累计费用, 日均费用, 峰值费用, 峰值日期, 累计 Token)
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 pub fn summarize_local(snapshots: &[DailySnapshot]) -> (f64, f64, f64, String, i64) {
     let total_yuan: f64 = snapshots.iter().map(|row| row.yuan).sum();
     let total_tokens: i64 = snapshots.iter().map(|row| row.tokens).sum();

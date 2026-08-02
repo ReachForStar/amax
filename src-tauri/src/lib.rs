@@ -4,6 +4,7 @@ mod api;
 mod crypto;
 mod db;
 
+use chrono::{Local, NaiveDate};
 use db::Db;
 use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -18,6 +19,24 @@ pub struct AppState {
     low_quota_notified: Mutex<bool>,
 }
 
+/// 校验统计区间：格式、先后、不超今天、跨度上限 1096 天
+fn validate_date_range(start_date: &str, end_date: &str) -> Result<(NaiveDate, NaiveDate), String> {
+    let start = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")
+        .map_err(|_| "起始日期格式无效，应为 YYYY-MM-DD".to_string())?;
+    let end = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
+        .map_err(|_| "结束日期格式无效，应为 YYYY-MM-DD".to_string())?;
+    if start > end {
+        return Err("起始日期不能晚于结束日期".into());
+    }
+    if end > Local::now().date_naive() {
+        return Err("结束日期不能超过今天".into());
+    }
+    if (end - start).num_days() > 1096 {
+        return Err("区间跨度不能超过 1096 天".into());
+    }
+    Ok((start, end))
+}
+
 #[tauri::command]
 fn get_config(state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
     let db = state
@@ -28,6 +47,90 @@ fn get_config(state: tauri::State<AppState>) -> Result<serde_json::Value, String
         "has_cookie": db.has_cookie(),
         "has_api_key": db.has_api_key(),
     }))
+}
+
+/// 本地统计每日行（余额 + 降级估算 + 请求数差分）
+#[derive(serde::Serialize)]
+struct LocalDaily {
+    date: String,
+    remaining: f64,
+    yuan: f64,
+    tokens: i64,
+    new_requests: Option<i64>,
+}
+
+#[derive(serde::Serialize)]
+struct LocalSummary {
+    total_yuan: f64,
+    avg_yuan: f64,
+    peak_yuan: f64,
+    peak_date: String,
+    total_tokens: i64,
+    days_with_data: usize,
+}
+
+#[derive(serde::Serialize)]
+struct LocalStats {
+    daily: Vec<LocalDaily>,
+    summary: LocalSummary,
+}
+
+#[tauri::command]
+fn get_local_stats(
+    state: tauri::State<AppState>,
+    start_date: String,
+    end_date: String,
+) -> Result<LocalStats, String> {
+    validate_date_range(&start_date, &end_date)?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| "数据库状态锁已损坏".to_string())?;
+    let snapshots = db
+        .get_daily_snapshots(&start_date, &end_date)
+        .map_err(|error| format!("查询本地快照失败: {error}"))?;
+    let diffs = db::derive_daily_requests(&snapshots);
+    let daily = snapshots
+        .iter()
+        .zip(diffs)
+        .map(|(row, new_requests)| LocalDaily {
+            date: row.date.clone(),
+            remaining: row.remaining,
+            yuan: row.yuan,
+            tokens: row.tokens,
+            new_requests,
+        })
+        .collect();
+    let (total_yuan, avg_yuan, peak_yuan, peak_date, total_tokens) =
+        db::summarize_local(&snapshots);
+    Ok(LocalStats {
+        daily,
+        summary: LocalSummary {
+            total_yuan,
+            avg_yuan,
+            peak_yuan,
+            peak_date,
+            total_tokens,
+            days_with_data: snapshots.len(),
+        },
+    })
+}
+
+#[tauri::command]
+async fn fetch_usage_stats(
+    state: tauri::State<'_, AppState>,
+    start_date: String,
+    end_date: String,
+) -> Result<api::UsageStats, String> {
+    let (start, end) = validate_date_range(&start_date, &end_date)?;
+    let cookie = {
+        let db = state
+            .db
+            .lock()
+            .map_err(|_| "数据库状态锁已损坏".to_string())?;
+        db.get_cookie()
+    };
+    api::fetch_usage_stats(&state.client, &cookie.unwrap_or_default(), start, end).await
 }
 
 #[tauri::command]
@@ -277,7 +380,83 @@ pub fn run() {
             get_config,
             save_config,
             fetch_dashboard,
+            get_local_stats,
+            fetch_usage_stats,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_date_range;
+    use chrono::{Duration, Local};
+
+    fn today() -> chrono::NaiveDate {
+        Local::now().date_naive()
+    }
+
+    #[test]
+    fn valid_range_passes() {
+        let end = today();
+        let start = end - Duration::days(6);
+        let result = validate_date_range(
+            &start.format("%Y-%m-%d").to_string(),
+            &end.format("%Y-%m-%d").to_string(),
+        );
+        assert!(result.is_ok());
+        let (s, e) = result.expect("合法区间应通过");
+        assert_eq!((e - s).num_days(), 6);
+    }
+
+    #[test]
+    fn start_after_end_rejected() {
+        let end = today();
+        let start = end + Duration::days(0);
+        let error = validate_date_range(
+            &(start + Duration::days(1)).format("%Y-%m-%d").to_string(),
+            &end.format("%Y-%m-%d").to_string(),
+        )
+        .expect_err("start 晚于 end 应拒绝");
+        assert!(error.contains("不能晚于"));
+    }
+
+    #[test]
+    fn future_end_rejected() {
+        let end = today() + Duration::days(1);
+        let error = validate_date_range(
+            &today().format("%Y-%m-%d").to_string(),
+            &end.format("%Y-%m-%d").to_string(),
+        )
+        .expect_err("未来日期应拒绝");
+        assert!(error.contains("不能超过今天"));
+    }
+
+    #[test]
+    fn span_over_1096_days_rejected() {
+        let end = today();
+        let start = end - Duration::days(1097);
+        let error = validate_date_range(
+            &start.format("%Y-%m-%d").to_string(),
+            &end.format("%Y-%m-%d").to_string(),
+        )
+        .expect_err("超 1096 天应拒绝");
+        assert!(error.contains("1096"));
+
+        // 恰好 1096 天应通过
+        let start_ok = end - Duration::days(1096);
+        assert!(
+            validate_date_range(
+                &start_ok.format("%Y-%m-%d").to_string(),
+                &end.format("%Y-%m-%d").to_string(),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn invalid_format_rejected() {
+        assert!(validate_date_range("2026/08/01", "2026-08-02").is_err());
+        assert!(validate_date_range("2026-02-30", "2026-08-02").is_err());
+    }
 }

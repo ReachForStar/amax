@@ -74,7 +74,6 @@ struct UsageResponse {
 
 /// 统计页每日消耗（官方口径，已补零）
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 pub struct UsageDaily {
     pub date: String,
     pub yuan: f64,
@@ -85,7 +84,6 @@ pub struct UsageDaily {
 
 /// 统计页模型分布项
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 pub struct UsageModel {
     pub model: String,
     pub yuan: f64,
@@ -96,7 +94,6 @@ pub struct UsageModel {
 
 /// 统计页区间汇总
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 pub struct UsageSummaryStats {
     pub total_yuan: f64,
     pub avg_yuan: f64,
@@ -109,7 +106,6 @@ pub struct UsageSummaryStats {
 
 /// 统计页官方数据聚合结果
 #[derive(Debug, Clone, Serialize)]
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 pub struct UsageStats {
     pub daily: Vec<UsageDaily>,
     pub models: Vec<UsageModel>,
@@ -150,13 +146,11 @@ pub fn build_client() -> Result<reqwest::Client, String> {
         .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))
 }
 
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 fn date_to_string(date: NaiveDate) -> String {
     date.format("%Y-%m-%d").to_string()
 }
 
 /// 聚合官网 by-model 响应：按日跨模型求和、补零、派生汇总与占比
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 fn aggregate_usage(response: UsageResponse, start: NaiveDate, end: NaiveDate) -> UsageStats {
     // 按日聚合（BTreeMap 天然有序）
     let mut by_day: BTreeMap<NaiveDate, UsageDaily> = BTreeMap::new();
@@ -423,7 +417,6 @@ pub async fn fetch_dashboard(
 }
 
 /// 拉取区间用量并聚合为统计页数据
-#[allow(dead_code)] // 统计页任务消费，当前尚无调用方
 pub async fn fetch_usage_stats(
     client: &reqwest::Client,
     cookie: &str,
