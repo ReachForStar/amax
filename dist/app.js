@@ -473,7 +473,7 @@ function renderTrendChart() {
 
   const datasets = [
     { label: '费用 ¥', data: yuanData, yAxisID: 'yYuan', borderColor: theme.accent, borderDash: dashed ? [5, 4] : [], tension: .25, pointRadius: 2, fill: false },
-    { label: 'Tokens', data: tokensData, yAxisID: 'yTokens', borderColor: '#7a8a80', borderDash: dashed ? [5, 4] : [], tension: .25, pointRadius: 2, fill: false },
+    { label: 'Tokens (M)', data: tokensData, yAxisID: 'yTokens', borderColor: '#7a8a80', borderDash: dashed ? [5, 4] : [], tension: .25, pointRadius: 2, fill: false },
   ];
 
   // 官方模式下叠加本地对比数据集（默认隐藏，图例点击开启）
@@ -485,7 +485,7 @@ function renderTrendChart() {
       tension: .25, pointRadius: 1, hidden: true, spanGaps: true,
     });
     datasets.push({
-      label: '本地 Tokens', data: labels.map((date) => localByDate.get(date)?.tokens ?? null),
+      label: '本地 Tokens (M)', data: labels.map((date) => localByDate.get(date)?.tokens ?? null),
       yAxisID: 'yTokens', borderColor: 'rgba(122, 138, 128, .55)', borderDash: [3, 3],
       tension: .25, pointRadius: 1, hidden: true, spanGaps: true,
     });
@@ -501,9 +501,19 @@ function renderTrendChart() {
       scales: {
         x: { ticks: { color: theme.muted, font: theme.font, maxTicksLimit: 8, maxRotation: 0 }, grid: { color: theme.grid } },
         yYuan: { position: 'left', ticks: { color: theme.muted, font: theme.font }, grid: { color: theme.grid }, title: { display: true, text: '¥', color: theme.muted, font: theme.font } },
-        yTokens: { position: 'right', ticks: { color: theme.muted, font: theme.font }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Tokens', color: theme.muted, font: theme.font } },
+        yTokens: { position: 'right', ticks: { color: theme.muted, font: theme.font, callback: (value) => (value / 1e6).toFixed(1) + 'M' }, grid: { drawOnChartArea: false }, title: { display: true, text: 'Tokens (M)', color: theme.muted, font: theme.font } },
       },
-      plugins: { legend: { labels: { color: theme.muted, font: theme.font, boxWidth: 14 } } },
+      plugins: {
+        legend: { labels: { color: theme.muted, font: theme.font, boxWidth: 14 } },
+        // 仅显示层换算：Tokens 轴以百万（M）为单位，费用轴保持原始数值；导出走 buildCsv/buildExportData，不受影响
+        tooltip: {
+          callbacks: {
+            label: (item) => item.dataset.yAxisID === 'yTokens'
+              ? `${item.dataset.label}: ${(item.parsed.y / 1e6).toFixed(2)}M`
+              : `${item.dataset.label}: ${item.parsed.y != null ? item.parsed.y.toFixed(6) : '--'}`,
+          },
+        },
+      },
     },
   });
 }
