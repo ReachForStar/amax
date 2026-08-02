@@ -33,6 +33,9 @@ struct DashboardPage {
   @State refreshing: boolean = false;
   @State lastUpdatedText: string = '等待同步';
   private lastRefreshAt: number = 0;
+  // 刷新串行标志：三入口（onPageShow / onRefreshing / 顶栏 ⟳）并发时仅首个执行，对齐桌面版 refresh_lock，
+  // 避免重复请求与重复快照；不能用 refreshing 判定——下拉入口进入时 Refresh 组件已把 $$this.refreshing 置 true，会误跳过
+  private refreshInFlight: boolean = false;
 
   async onPageShow(): Promise<void> {
     const now = Date.now();
@@ -67,43 +70,51 @@ struct DashboardPage {
   }
 
   async refresh(): Promise<void> {
-    this.refreshing = true;
-    this.errorMsg = '';
+    if (this.refreshInFlight) {
+      return;
+    }
+    this.refreshInFlight = true;
     try {
-      // getCookie 在密文损坏时会 reject：兜底视为无效凭据，与认证错误同路径
-      let cookie: string;
+      this.refreshing = true;
+      this.errorMsg = '';
       try {
-        cookie = (await getCookie()) ?? '';
-      } catch (secretError) {
-        const reason = secretError instanceof Error ? secretError.message : JSON.stringify(secretError);
-        console.error(`凭据读取失败，视为无效凭据：${reason}`);
-        await this.gotoConfig();
-        return;
+        // getCookie 在密文损坏时会 reject：兜底视为无效凭据，与认证错误同路径
+        let cookie: string;
+        try {
+          cookie = (await getCookie()) ?? '';
+        } catch (secretError) {
+          const reason = secretError instanceof Error ? secretError.message : JSON.stringify(secretError);
+          console.error(`凭据读取失败，视为无效凭据：${reason}`);
+          await this.gotoConfig();
+          return;
+        }
+        const data = await fetchDashboard(cookie);
+        this.data = data;
+        this.lastRefreshAt = Date.now();
+        this.lastUpdatedText = '刚刚更新';
+        await saveSnapshot({
+          savedAt: localRfc3339(new Date()),
+          todayYuan: data.todayYuan,
+          totalTokens: data.todayTokens,
+          remaining: data.remaining,
+          used: data.used,
+          total: data.total,
+          requestCount: data.requestCount,
+        });
+      } catch (error) {
+        if (error instanceof ApiError && error.isAuthError) {
+          await this.gotoConfig();
+          return;
+        }
+        // 其他错误：保留已有数据，显示重试信息
+        this.errorMsg = error instanceof ApiError
+          ? error.message + '（点击刷新重试）'
+          : '刷新失败，请重试';
+      } finally {
+        this.refreshing = false;
       }
-      const data = await fetchDashboard(cookie);
-      this.data = data;
-      this.lastRefreshAt = Date.now();
-      this.lastUpdatedText = '刚刚更新';
-      await saveSnapshot({
-        savedAt: localRfc3339(new Date()),
-        todayYuan: data.todayYuan,
-        totalTokens: data.todayTokens,
-        remaining: data.remaining,
-        used: data.used,
-        total: data.total,
-        requestCount: data.requestCount,
-      });
-    } catch (error) {
-      if (error instanceof ApiError && error.isAuthError) {
-        await this.gotoConfig();
-        return;
-      }
-      // 其他错误：保留已有数据，显示重试信息
-      this.errorMsg = error instanceof ApiError
-        ? error.message + '（点击刷新重试）'
-        : '刷新失败，请重试';
     } finally {
-      this.refreshing = false;
+      this.refreshInFlight = false;
     }
   }
 

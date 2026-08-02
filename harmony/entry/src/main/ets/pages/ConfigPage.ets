@@ -20,7 +20,12 @@ struct ConfigPage {
   @State hasCookie: boolean = false;
 
   async aboutToAppear(): Promise<void> {
-    this.hasCookie = (await getCookie()) !== null;
+    try {
+      this.hasCookie = (await getCookie()) !== null;
+    } catch (error) {
+      // 凭据读取失败（如密文损坏），按未登录处理
+      this.hasCookie = false;
+    }
   }
 
   setStatus(text: string, isError: boolean): void {
