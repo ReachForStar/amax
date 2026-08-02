@@ -52,6 +52,9 @@
         <button id="refresh-btn" class="btn icon" title="刷新数据" aria-label="刷新数据">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" /></svg>
         </button>
+        <button id="stats-btn" class="btn icon" title="统计分析" aria-label="统计分析">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V10m7 10V4m7 16v-7" /></svg>
+        </button>
         <button id="settings-btn" class="btn icon" title="设置" aria-label="设置">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6l-.05.08H9.95L9.9 20a1.7 1.7 0 0 0-1-.6 1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1l-.08-.05V9.95L4 9.9a1.7 1.7 0 0 0 .6-1 1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6l.05-.08h3.99l.05.08a1.7 1.7 0 0 0 1 .6 1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.08.38.3.74.6 1l.08.05v3.99L20 14c-.3.26-.52.62-.6 1Z" /></svg>
         </button>
@@ -102,6 +105,78 @@
       </article>
     </main>
   </section>
+
+  <section id="stats-screen" class="screen hidden" aria-labelledby="stats-title" aria-hidden="true">
+    <header class="topbar">
+      <p id="stats-title" class="product-mark">AMAX / ANALYTICS</p>
+      <div class="topbar-actions">
+        <button id="export-csv-btn" class="btn tiny" type="button" disabled>CSV</button>
+        <button id="export-json-btn" class="btn tiny" type="button" disabled>JSON</button>
+        <button id="export-xlsx-btn" class="btn tiny" type="button" disabled>XLSX</button>
+        <button id="stats-back-btn" class="btn secondary" type="button">返回看板</button>
+      </div>
+    </header>
+
+    <main class="content stats-content">
+      <div class="range-bar" role="group" aria-label="统计区间">
+        <div class="range-presets">
+          <button type="button" class="range-preset is-active" data-days="7">7天</button>
+          <button type="button" class="range-preset" data-days="14">14天</button>
+          <button type="button" class="range-preset" data-days="30">30天</button>
+        </div>
+        <div class="range-dates">
+          <input type="date" id="range-start" aria-label="起始日期" />
+          <span class="range-sep">~</span>
+          <input type="date" id="range-end" aria-label="结束日期" />
+        </div>
+      </div>
+      <p id="range-error" class="range-error hidden" role="alert"></p>
+
+      <section class="stats-summary" aria-label="区间汇总">
+        <h2 id="summary-title" class="telemetry-label">RANGE SUMMARY</h2>
+        <div class="summary-grid">
+          <div class="summary-card"><p class="telemetry-label">累计费用</p><p id="sum-total-yuan" class="summary-value">--</p></div>
+          <div class="summary-card"><p class="telemetry-label">日均费用</p><p id="sum-avg-yuan" class="summary-value">--</p></div>
+          <div class="summary-card"><p class="telemetry-label">单日峰值</p><p id="sum-peak" class="summary-value">--</p></div>
+          <div class="summary-card"><p class="telemetry-label">有使用天数</p><p id="sum-days" class="summary-value">--</p></div>
+          <div class="summary-card"><p class="telemetry-label">区间总请求数</p><p id="sum-requests" class="summary-value">--</p></div>
+        </div>
+      </section>
+
+      <section class="stats-block" aria-label="消耗趋势">
+        <div class="block-head">
+          <h2 class="telemetry-label">COST / TOKENS TREND</h2>
+          <p id="trend-note" class="metric-note"></p>
+        </div>
+        <p id="trend-error" class="block-error hidden" role="alert"></p>
+        <div class="chart-wrap"><canvas id="trend-chart" aria-label="消耗趋势图" role="img"></canvas></div>
+      </section>
+
+      <section class="stats-block" aria-label="请求数趋势">
+        <h2 class="telemetry-label">DAILY REQUESTS</h2>
+        <div class="chart-wrap chart-wrap-sm"><canvas id="requests-chart" aria-label="每日请求数趋势图" role="img"></canvas></div>
+      </section>
+
+      <section class="stats-block" aria-label="模型分布">
+        <div class="block-head">
+          <h2 class="telemetry-label">MODEL DISTRIBUTION</h2>
+          <p id="model-basis-note" class="metric-note"></p>
+        </div>
+        <p id="model-error" class="block-error hidden" role="alert"></p>
+        <div class="model-layout">
+          <div class="chart-wrap chart-wrap-sm"><canvas id="model-chart" aria-label="模型分布环图" role="img"></canvas></div>
+          <ul id="model-list" class="model-list"></ul>
+        </div>
+      </section>
+
+      <section id="remaining-block" class="stats-block" aria-label="余额趋势">
+        <h2 class="telemetry-label">BALANCE TREND</h2>
+        <div class="chart-wrap chart-wrap-sm"><canvas id="remaining-chart" aria-label="余额趋势图" role="img"></canvas></div>
+      </section>
+    </main>
+  </section>
+  <script src="vendor/chart.umd.js"></script>
+  <script src="vendor/xlsx.full.min.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
