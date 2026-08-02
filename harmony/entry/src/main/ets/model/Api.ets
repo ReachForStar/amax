@@ -34,6 +34,27 @@ interface UsageSummary {
   output_tokens: number;
 }
 
+// ArkTS 禁止对象字面量类型（arkts-no-obj-literals-as-types），泛型实参与返回值均须用显式接口
+interface UserSelfPayload {
+  data: UserInfo;
+}
+
+interface UsagePayload {
+  summary: UsageSummary;
+}
+
+interface UsageQuery {
+  start_time: number;
+  end_time: number;
+  user_id: string;
+  status: string;
+}
+
+interface TodayRange {
+  start: number;
+  end: number;
+}
+
 function commonHeaders(cookie: string): Record<string, string> {
   return {
     'User-Agent': 'Mozilla/5.0',
@@ -71,7 +92,7 @@ function parseBody<T>(resp: http.HttpResponse): T {
 }
 
 // 本地时区当日起止 Unix 秒（与桌面版 api.rs 同口径）
-function todayRange(): { start: number; end: number } {
+function todayRange(): TodayRange {
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
   const end = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
@@ -91,7 +112,7 @@ export async function fetchDashboard(cookie: string): Promise<DashboardData> {
   // HTTP 200 但响应体非 JSON 时 parseBody 抛原生 SyntaxError，统一收敛为 ApiError（对齐桌面版"数据解析失败"）
   let user: UserInfo;
   try {
-    user = (parseBody<{ data: UserInfo }>(userResp)).data;
+    user = (parseBody<UserSelfPayload>(userResp)).data;
   } catch (error) {
     throw new ApiError('数据解析失败');
   }
@@ -108,15 +129,16 @@ export async function fetchDashboard(cookie: string): Promise<DashboardData> {
   let logsAvailable = false;
   try {
     const range = todayRange();
+    const query: UsageQuery = {
+      start_time: range.start,
+      end_time: range.end,
+      user_id: String(user.id),
+      status: 'success',
+    };
     const logsResp = await request(`${BASE_URL}/v1/logs/token-usage/by-model`, cookie,
-      http.RequestMethod.POST, {
-        start_time: range.start,
-        end_time: range.end,
-        user_id: String(user.id),
-        status: 'success',
-      });
+      http.RequestMethod.POST, query);
     if (logsResp.responseCode === 200) {
-      const payload = parseBody<{ summary: UsageSummary }>(logsResp);
+      const payload = parseBody<UsagePayload>(logsResp);
       if (payload.summary) {
         summary = payload.summary;
         logsAvailable = true;
