@@ -129,7 +129,8 @@ impl Db {
         total: f64,
         request_count: i64,
     ) -> Result<(), rusqlite::Error> {
-        // 本地时区 RFC3339：date(saved_at) 截取即本地日期，与按日分组口径一致
+        // saved_at 以本地时区 RFC3339 写入，查询侧统一用 date(saved_at, 'localtime') 取本地日期
+        // （SQLite 对带偏移时间串先归一 UTC，无 'localtime' 修饰会截取成 UTC 日期）
         // 快照永久保留，供统计页按日聚合，不再做定期清理
         self.conn.execute(
             "INSERT INTO dashboard_snapshot
@@ -155,9 +156,9 @@ impl Db {
         end_date: &str,
     ) -> Result<Vec<DailySnapshot>, rusqlite::Error> {
         let mut statement = self.conn.prepare(
-            "SELECT date(saved_at) AS day, today_yuan, total_tokens, remaining, request_count
+            "SELECT date(saved_at, 'localtime') AS day, today_yuan, total_tokens, remaining, request_count
              FROM dashboard_snapshot
-             WHERE id IN (SELECT MAX(id) FROM dashboard_snapshot GROUP BY date(saved_at))
+             WHERE id IN (SELECT MAX(id) FROM dashboard_snapshot GROUP BY date(saved_at, 'localtime'))
                AND day BETWEEN ?1 AND ?2
              ORDER BY day",
         )?;
@@ -261,20 +262,37 @@ mod tests {
         assert!(derive_daily_requests(&[]).is_empty());
     }
 
+    fn local_rfc3339(date_time: &str) -> String {
+        // 给无偏移的本地时间串追加当前机器时区偏移，模拟 save_snapshot 的写入形态
+        format!("{date_time}{}", chrono::Local::now().format("%:z"))
+    }
+
     fn db_with_snapshots() -> Db {
         let db = Db::open(std::path::Path::new(":memory:")).expect("内存数据库应打开成功");
         // (saved_at, today_yuan, total_tokens, remaining, request_count)
         let rows = [
-            ("2026-08-01 08:00:00", 5.0, 100, 90.0, Some(10)),
-            ("2026-08-01 20:00:00", 12.0, 300, 83.0, Some(25)), // 8-01 末条
-            ("2026-08-02 10:00:00", 3.0, 80, 80.0, None),       // 老数据模拟 NULL
+            (
+                local_rfc3339("2026-08-01T08:00:00"),
+                5.0,
+                100,
+                90.0,
+                Some(10),
+            ),
+            (
+                local_rfc3339("2026-08-01T20:00:00"),
+                12.0,
+                300,
+                83.0,
+                Some(25),
+            ), // 8-01 末条
+            (local_rfc3339("2026-08-02T10:00:00"), 3.0, 80, 80.0, None), // 老数据模拟 NULL
         ];
         for (saved_at, yuan, tokens, remaining, req) in rows {
             db.conn
                 .execute(
                     "INSERT INTO dashboard_snapshot
                          (saved_at, today_yuan, total_tokens, remaining, used, total, request_count)
-                     VALUES (datetime(?1), ?2, ?3, ?4, 0, 100, ?5)",
+                     VALUES (?1, ?2, ?3, ?4, 0, 100, ?5)",
                     rusqlite::params![saved_at, yuan, tokens, remaining, req],
                 )
                 .expect("插入快照应成功");
@@ -304,6 +322,26 @@ mod tests {
             .expect("查询应成功");
         assert_eq!(only_first.len(), 1);
         assert_eq!(only_first[0].date, "2026-08-01");
+    }
+
+    #[test]
+    fn daily_snapshots_attribute_early_morning_to_local_date() {
+        // 防回归：SQLite date() 对带偏移时间串先归一 UTC，无 'localtime' 会把凌晨快照计入前一天
+        let db = Db::open(std::path::Path::new(":memory:")).expect("内存数据库应打开成功");
+        db.conn
+            .execute(
+                "INSERT INTO dashboard_snapshot
+                     (saved_at, today_yuan, total_tokens, remaining, used, total, request_count)
+                 VALUES (?1, 1.0, 10, 99.0, 0, 100, 1)",
+                rusqlite::params![local_rfc3339("2026-08-03T06:00:00")],
+            )
+            .expect("插入快照应成功");
+
+        let rows = db
+            .get_daily_snapshots("2026-08-03", "2026-08-03")
+            .expect("查询应成功");
+        assert_eq!(rows.len(), 1, "凌晨 6 点快照应归属本地当日");
+        assert_eq!(rows[0].date, "2026-08-03");
     }
 
     #[test]
