@@ -31,14 +31,16 @@ function baseProperties(purpose: number, nonce?: Uint8Array): Array<huks.HuksPar
 const ENCRYPT_DECRYPT: number =
   huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_ENCRYPT | huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_DECRYPT;
 
-// 串行化懒生成：防止并发调用方同时判定"不存在"而重复生成。
-// generateKeyItem 对已存在别名不报错（错误码表无同名项），覆盖密钥会使存量密文永久不可解
+// 串行化懒生成：
+// 1. API 20+ 起 generateKeyItem 遇同名密钥抛 12000017（不覆盖），工程目标 API 23，该错误仅说明并发竞态结果；
+// 2. 更低 API 设备上同名生成可能覆盖密钥，存量密文将永久不可解，故串行化对低版本仍有必要；
+// 3. 同时消除并发 check-then-generate 竞态（两个调用方同时判定"不存在"而重复生成）
 let ensureKeyTask: Promise<void> | null = null;
 
 function ensureKey(): Promise<void> {
   if (ensureKeyTask === null) {
     ensureKeyTask = generateKeyIfAbsent().catch((error: Error): Promise<void> => {
-      // 失败时清掉缓存允许下次重试；成功结果永久复用
+      // 失败时清掉缓存允许下次重试（如 12000017 竞态失败后重试走 hasKeyItem=true 自愈）；成功结果永久复用
       ensureKeyTask = null;
       return Promise.reject(error);
     });
