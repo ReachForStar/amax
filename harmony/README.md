@@ -43,7 +43,7 @@ D:/command-line-tools/bin/hvigorw.bat test -p module=entry -p product=default -p
 - `entry/src/main/ets/pages/` — DashboardPage（看板：Token / 费用 / 余额）/ ConfigPage（手动粘贴 + 登录入口）/ LoginPage（官网 WebView 登录，`onLoadIntercept` 捕获 `/dashboard` 重定向并经 `WebCookieManager.fetchCookieSync` 提取 Cookie）。
 - `entry/src/main/ets/model/` — Api（官网接口，同桌面版 api.rs 协议与容错）/ Store（preferences 存凭据 + RDB 存快照，schema 同桌面版 db.rs，含 request_count）/ Secret（HUKS AES-256-GCM 凭据加密）。
 - `entry/src/main/ets/common/` — Theme（主题常量）/ BreakpointSystem（sm<600 / 600≤md<840 / lg≥840 vp 断点）/ GridBackground（网格背景）/ Format（纯函数工具）。
-- `entry/src/main/ets/entryability/` — EntryAbility：窗口生命周期、断点注册（须待窗口上屏后）、后台定时刷新与低余额通知。
+- `entry/src/main/ets/entryability/` — EntryAbility：窗口生命周期、断点注册（须待窗口上屏后）。
 - `entry/src/test/` — 本地单元测试（Format 等纯函数，@ohos/hypium）。
 - `entry/src/ohosTest/` — 仪器测试脚手架（HUKS 加解密往返、旧明文兼容、Store 凭据与快照往返）。
 

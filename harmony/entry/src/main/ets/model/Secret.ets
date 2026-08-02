@@ -100,7 +100,7 @@ async function runSession(purpose: number, nonce: Uint8Array, inData: Uint8Array
     const update = await huks.updateSession(session.handle, options);
     options.inData = new Uint8Array(0);
     const finish = await huks.finishSession(session.handle, options);
-    // 加密：update 返回密文、finish 返回 tag；解密：明文来自 update，finish 校验 tag 输出通常为空
+    // 加密：update 返回密文、finish 返回 tag；解密：update 返回 null，明文经 finish 校验 tag 后释放
     return concat(outDataOf(update), outDataOf(finish));
   } catch (error) {
     try {
