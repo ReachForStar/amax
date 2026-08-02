@@ -318,7 +318,7 @@ const statsCharts = { trend: null, requests: null, model: null, remaining: null 
 let statsUsage = null;   // fetch_usage_stats 结果
 let statsLocal = null;   // get_local_stats 结果
 let statsSource = 'official'; // 'official' | 'local_estimate'
-let statsRange = null;   // { start_date, end_date }
+let statsRange = null;   // { startDate, endDate }，内部状态用驼峰键，invoke 入参须为 camelCase
 
 function chartTheme() {
   return {
@@ -350,13 +350,13 @@ function syncRangeInputs() {
   const today = todayStr();
   rangeStartInput.max = today;
   rangeEndInput.max = today;
-  rangeStartInput.value = statsRange.start_date;
-  rangeEndInput.value = statsRange.end_date;
+  rangeStartInput.value = statsRange.startDate;
+  rangeEndInput.value = statsRange.endDate;
 }
 
 async function enterStats() {
   if (!statsRange) {
-    statsRange = { start_date: daysAgoStr(7), end_date: todayStr() };
+    statsRange = { startDate: daysAgoStr(7), endDate: todayStr() };
     setActivePreset(7);
     syncRangeInputs();
   }
@@ -365,7 +365,7 @@ async function enterStats() {
 }
 
 function applyPreset(days) {
-  statsRange = { start_date: daysAgoStr(days), end_date: todayStr() };
+  statsRange = { startDate: daysAgoStr(days), endDate: todayStr() };
   setActivePreset(days);
   syncRangeInputs();
   hideRangeError();
@@ -379,7 +379,7 @@ function applyCustomRange() {
   setActivePreset(null);
   if (start > end) { showRangeError('起始日期不能晚于结束日期'); return; }
   if (end > todayStr()) { showRangeError('结束日期不能超过今天'); return; }
-  statsRange = { start_date: start, end_date: end };
+  statsRange = { startDate: start, endDate: end };
   hideRangeError();
   loadStats();
 }
@@ -659,7 +659,8 @@ function buildExportData() {
   return {
     app: 'amax-dashboard',
     exported_at: new Date().toISOString(),
-    range: statsRange,
+    // 导出格式遵循 spec 保持 snake_case，不随内部驼峰状态改变
+    range: { start_date: statsRange.startDate, end_date: statsRange.endDate },
     source: statsSource,
     percent_basis: official ? statsUsage.percent_basis : null,
     summary: official ? statsUsage.summary : (statsLocal ? statsLocal.summary : null),
@@ -677,7 +678,7 @@ function buildExportData() {
 }
 
 function exportFileName(ext) {
-  return `amax-stats_${statsRange.start_date}_to_${statsRange.end_date}.${ext}`;
+  return `amax-stats_${statsRange.startDate}_to_${statsRange.endDate}.${ext}`;
 }
 
 function downloadBlob(blob, filename) {
