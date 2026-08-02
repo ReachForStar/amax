@@ -1,2 +1,9 @@
 target/
 .claude/
+
+# HarmonyOS
+harmony/**/build/
+harmony/.hvigor/
+harmony/**/oh_modules/
+harmony/.idea/
+harmony/**/*.har
