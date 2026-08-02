@@ -109,6 +109,7 @@ async fn refresh_dashboard(
             data.remaining,
             data.used,
             data.total,
+            data.request_count,
         )
         .map_err(|error| format!("保存数据快照失败: {error}"))?;
     }
