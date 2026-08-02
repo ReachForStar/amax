@@ -86,3 +86,16 @@ cargo tauri build
 真实认证数据只存放在用户应用数据目录的 SQLite 中。运行数据请求依赖有效 Session Cookie；API Key 当前仅作为兼容配置保留，不参与官网账户级聚合。没有凭据时仍可验证配置页、窗口和托盘生命周期。
 
 统计页经看板顶栏图表按钮进入：区间选择器（预设 7/14/30 天 + 自定义起止日期，跨度上限 1096 天）驱动 `fetch_usage_stats`（官方主源）与 `get_local_stats`（余额、请求数、对比与降级数据）并行调用；官方失败时趋势与汇总回退本地估算并标注，模型分布仅官方可用；消耗趋势图可叠加本地对比数据集（默认隐藏）；导出按钮将当前区间数据输出为 CSV / JSON / XLSX（Chart.js 与 SheetJS 以 UMD 单文件存放于 `dist/vendor/`）。
+
+## HarmonyOS 版
+
+`harmony/` 为 AMAX Dashboard 的 HarmonyOS 6 原生适配（ArkTS / ArkUI，Stage 模型），与桌面版共享数据口径与官网接口约定：
+
+- 页面：DashboardPage / ConfigPage（应用内 WebView 登录 + 手动粘贴）/ LoginPage（官网登录页，`onLoadIntercept` 仅对主框架到 `/dashboard` 的重定向判定登录成功，`WebCookieManager.fetchCookieSync` 传完整 URL 提取 Cookie）。
+- model 层与桌面版模块对应：`Api.ets`（同 api.rs 协议与容错）、`Store.ets`（同 db.rs 快照 schema，含 request_count）、`Secret.ets`（HUKS AES-256-GCM 替代 DPAPI，`huks:v1:<base64(iv | 密文 | tag)>` 前缀 + 旧明文兼容）。
+- HUKS GCM 参数契约（仪器测试验证后的最终形态）：GCM 强制非空 AAD（固定常量，空 AAD 报 401）；解密须以 `HUKS_TAG_AE_TAG` 传入待校验 tag、密文单独送入会话，update 返回 null、明文取自 finish（auth-then-release）；调整 Secret.ets 时不得改回空 AAD 或「密文|tag 合并送 update」的写法。
+- 路由一律 `this.getUIContext().getRouter()` 实例；静态 `router` 接口自 API 18 废弃，异步回调中使用会闪退。
+- 断点自适应：`BreakpointSystem`（sm<600 / 600≤md<840 / lg≥840 vp）+ 内容区 md/lg 限宽 720vp 居中；deviceTypes 为 phone / tablet / 2in1。断点注册须在窗口上屏后（`loadContent` 回调）执行，提前调用 `matchMediaSync` 抛 1300002 会中断启动。
+- 工具链：devecocli（`/c/nvm4w/nodejs/devecocli`，build / run / signature / docs / ui / log）；测试用 hvigorw（`D:/command-line-tools/bin/hvigorw.bat test -p module=entry -p product=default -p testType=LocalTest`，@ohos/hypium，无需设备；仪器测试改 `-p testType=InstrumentTest`，需设备）。
+- 签名：DevEco Studio 自动签名，材料在 `~/.ohos/config/`，signingConfigs 已入 `build-profile.json5`（IDE 加密串）；证书失效时用 `devecocli signature generate --product default` 重新生成。
+- 开发命令详见 `harmony/README.md`；API 细节以 `devecocli docs` 查证为准。
