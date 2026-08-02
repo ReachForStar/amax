@@ -644,8 +644,122 @@ function renderRemainingChart() {
   });
 }
 
-// 占位实现 — Task 8（导出）替换
-function updateExportButtons() {}
+// ═══ 数据导出（CSV / JSON / XLSX） ═══
+
+function updateExportButtons() {
+  const hasData = Boolean(statsUsage || (statsLocal && statsLocal.daily.length));
+  [exportCsvBtn, exportJsonBtn, exportXlsxBtn].forEach((btn) => { btn.disabled = !hasData; });
+}
+
+// 汇总官方与本地数据为统一导出结构
+function buildExportData() {
+  const official = statsSource === 'official' && statsUsage;
+  const localByDate = new Map((statsLocal && statsLocal.daily || []).map((d) => [d.date, d]));
+  const baseDaily = official ? statsUsage.daily : (statsLocal && statsLocal.daily || []);
+  return {
+    app: 'amax-dashboard',
+    exported_at: new Date().toISOString(),
+    range: statsRange,
+    source: statsSource,
+    percent_basis: official ? statsUsage.percent_basis : null,
+    summary: official ? statsUsage.summary : (statsLocal ? statsLocal.summary : null),
+    daily: baseDaily.map((d) => ({
+      date: d.date,
+      yuan: d.yuan,
+      tokens: d.tokens,
+      input_tokens: official ? d.input_tokens : null,
+      output_tokens: official ? d.output_tokens : null,
+      new_requests: localByDate.has(d.date) ? localByDate.get(d.date).new_requests : null,
+      remaining: localByDate.has(d.date) ? localByDate.get(d.date).remaining : null,
+    })),
+    models: official ? statsUsage.models : [],
+  };
+}
+
+function exportFileName(ext) {
+  return `amax-stats_${statsRange.start_date}_to_${statsRange.end_date}.${ext}`;
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function csvEscape(value) {
+  const text = value == null ? '' : String(value);
+  return /[",\n\r]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+}
+
+function buildCsv(data) {
+  const lines = [];
+  lines.push('[区间汇总]');
+  lines.push('指标,值');
+  if (data.summary) {
+    const s = data.summary;
+    lines.push(`累计费用(元),${csvEscape(s.total_yuan)}`);
+    lines.push(`日均费用(元),${csvEscape(s.avg_yuan)}`);
+    lines.push(`单日峰值(元),${csvEscape(s.peak_yuan)}`);
+    lines.push(`峰值日期,${csvEscape(s.peak_date)}`);
+    lines.push(`累计Tokens,${csvEscape(s.total_tokens)}`);
+    if (s.request_count != null) lines.push(`区间总请求数,${csvEscape(s.request_count)}`);
+  }
+  lines.push(`数据来源,${data.source}`);
+  lines.push('');
+  lines.push('[每日趋势]');
+  lines.push('date,yuan,tokens,input_tokens,output_tokens,new_requests,remaining');
+  data.daily.forEach((d) => lines.push(
+    [d.date, d.yuan, d.tokens, d.input_tokens, d.output_tokens, d.new_requests, d.remaining]
+      .map(csvEscape).join(',')));
+  lines.push('');
+  lines.push('[模型分布]');
+  lines.push('model,yuan,tokens,request_count,percent,percent_basis');
+  data.models.forEach((m) => lines.push(
+    [m.model, m.yuan, m.tokens, m.request_count, m.percent, data.percent_basis]
+      .map(csvEscape).join(',')));
+  // BOM（U+FEFF）防 Excel 中文乱码；用 fromCharCode 避免源码中不可见字符
+  return String.fromCharCode(0xFEFF) + lines.join('\r\n');
+}
+
+exportCsvBtn.addEventListener('click', () => {
+  const data = buildExportData();
+  downloadBlob(new Blob([buildCsv(data)], { type: 'text/csv;charset=utf-8' }), exportFileName('csv'));
+});
+
+exportJsonBtn.addEventListener('click', () => {
+  const data = buildExportData();
+  downloadBlob(
+    new Blob([JSON.stringify(data, null, 2)], { type: 'application/json;charset=utf-8' }),
+    exportFileName('json'));
+});
+
+exportXlsxBtn.addEventListener('click', () => {
+  const data = buildExportData();
+  const wb = XLSX.utils.book_new();
+
+  const summaryRows = [['指标', '值']];
+  if (data.summary) {
+    const s = data.summary;
+    summaryRows.push(['累计费用(元)', s.total_yuan], ['日均费用(元)', s.avg_yuan],
+      ['单日峰值(元)', s.peak_yuan], ['峰值日期', s.peak_date], ['累计Tokens', s.total_tokens]);
+    if (s.request_count != null) summaryRows.push(['区间总请求数', s.request_count]);
+  }
+  summaryRows.push(['数据来源', data.source], ['区间起', data.range.start_date], ['区间止', data.range.end_date]);
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryRows), '区间汇总');
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+    data.daily.length ? data.daily : [{ date: '', yuan: '', tokens: '' }]), '每日趋势');
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(
+    data.models.length ? data.models : [{ model: '', yuan: '', tokens: '', request_count: '', percent: '' }]), '模型分布');
+
+  XLSX.writeFile(wb, exportFileName('xlsx'));
+});
 
 // ═══ 启动 ═══
 async function init() {
