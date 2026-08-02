@@ -9,10 +9,14 @@ const PREFIX = 'huks:v1:';
 const IV_LENGTH = 12;
 // GCM 认证标签长度（HUKS GCM 默认 128 位），仅用于解密输入的下限校验
 const GCM_TAG_LENGTH = 16;
+// GCM 强制要求非空 AAD（FAQ：GCM 须用 AAD 做完整性认证）：
+// 实测空字节 AAD 报 401（HksBuildParamSet fail），缺省 AAD TAG 报 parameter does not exist；
+// 故取固定非空常量，加解密经 baseProperties 一致使用；AAD 不写入存储格式，无迁移负担
+const GCM_AAD: Uint8Array = new util.TextEncoder().encodeInto('amax-huks-gcm-aad');
 
 // purpose 枚举按位或后的类型为 number，形参声明为 number，
 // 规避 ArkTS 严格模式下 number 与枚举类型的可赋值性风险
-function baseProperties(purpose: number, nonce?: Uint8Array): Array<huks.HuksParam> {
+function baseProperties(purpose: number, nonce?: Uint8Array, aeTag?: Uint8Array): Array<huks.HuksParam> {
   const props: Array<huks.HuksParam> = [
     { tag: huks.HuksTag.HUKS_TAG_ALGORITHM, value: huks.HuksKeyAlg.HUKS_ALG_AES },
     { tag: huks.HuksTag.HUKS_TAG_KEY_SIZE, value: huks.HuksKeySize.HUKS_AES_KEY_SIZE_256 },
@@ -21,9 +25,13 @@ function baseProperties(purpose: number, nonce?: Uint8Array): Array<huks.HuksPar
     { tag: huks.HuksTag.HUKS_TAG_BLOCK_MODE, value: huks.HuksCipherMode.HUKS_MODE_GCM },
   ];
   if (nonce !== undefined) {
-    // GCM 强制要求携带 NONCE 与 AAD 两个 TAG（AAD 可为空字节数组，TAG 不能省略）
+    // GCM 须同时携带 NONCE 与非空 AAD（见 GCM_AAD 注释）；加解密两侧经本函数保持一致
     props.push({ tag: huks.HuksTag.HUKS_TAG_NONCE, value: nonce });
-    props.push({ tag: huks.HuksTag.HUKS_TAG_ASSOCIATED_DATA, value: new Uint8Array(0) });
+    props.push({ tag: huks.HuksTag.HUKS_TAG_ASSOCIATED_DATA, value: GCM_AAD });
+  }
+  if (aeTag !== undefined) {
+    // GCM 解密须以 HUKS_TAG_AE_TAG 传入待校验的认证标签；加密侧不传（标签由 finish 产出）
+    props.push({ tag: huks.HuksTag.HUKS_TAG_AE_TAG, value: aeTag });
   }
   return props;
 }
@@ -69,16 +77,21 @@ function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
   return out;
 }
 
-// HuksReturnResult.outData 为可选字段，缺失时回退空数组，保证拼接与后续解码安全
-function outDataOf(result: huks.HuksReturnResult): Uint8Array {
+// HuksReturnResult.outData 为可选字段，缺失时回退空数组；GCM 解密 update 返回 null
+// （明文须待 finish 校验标签后才释放，故解密明文取自 finish），result 可能为 null 须兜底
+function outDataOf(result: huks.HuksReturnResult | null): Uint8Array {
+  if (result === null) {
+    return new Uint8Array(0);
+  }
   return result.outData ?? new Uint8Array(0);
 }
 
 // 三段式 GCM 会话：init（inData 置空）→ update（携带数据）→ finish（inData 置空）
 // 任一阶段出错先按文档要求调用 abortSession 释放 handle，再原样抛出错误（不吞错）
-async function runSession(purpose: number, nonce: Uint8Array, inData: Uint8Array): Promise<Uint8Array> {
+async function runSession(purpose: number, nonce: Uint8Array, inData: Uint8Array,
+  aeTag?: Uint8Array): Promise<Uint8Array> {
   const options: huks.HuksOptions = {
-    properties: baseProperties(purpose, nonce),
+    properties: baseProperties(purpose, nonce, aeTag),
     inData: new Uint8Array(0),
   };
   const session = await huks.initSession(KEY_ALIAS, options);
@@ -121,8 +134,10 @@ export async function decryptSecret(stored: string): Promise<string> {
     throw new Error('invalid huks secret: blob shorter than iv + gcm tag');
   }
   const iv = blob.slice(0, IV_LENGTH);
-  const cipher = blob.slice(IV_LENGTH);
-  const out = await runSession(huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_DECRYPT, iv, cipher);
-  // 解密失败（篡改/密钥异常）由 HUKS 抛错，调用方视为无效凭据
+  // 存储格式 iv | 密文 | tag：解密时拆出末尾 tag 经 HUKS_TAG_AE_TAG 校验，密文单独送入会话
+  const tag = blob.slice(blob.length - GCM_TAG_LENGTH);
+  const cipher = blob.slice(IV_LENGTH, blob.length - GCM_TAG_LENGTH);
+  const out = await runSession(huks.HuksKeyPurpose.HUKS_KEY_PURPOSE_DECRYPT, iv, cipher, tag);
+  // 解密失败（篡改/密钥异常/标签校验失败）由 HUKS 抛错，调用方视为无效凭据
   return util.TextDecoder.create('utf-8').decodeToString(out);
 }
