@@ -1,4 +1,4 @@
-// 纯函数：Token 与金额格式化、Cookie 解析、HTTP 错误分级
+// 纯函数：Token 与金额格式化、Cookie 解析、HTTP 错误分级、日期字符串工具
 export function formatTokens(n: number): string {
   if (n >= 1e6) {
     return (n / 1e6).toFixed(2) + 'M';
@@ -43,4 +43,25 @@ export class ApiError extends Error {
     super(message);
     this.isAuthError = isAuthError;
   }
+}
+
+// ---- 日期字符串工具（统计页区间选择用，与桌面版 app.js toDateStr/todayStr/daysAgoStr 同口径） ----
+
+// Date → 本地时区 'YYYY-MM-DD'
+function toDateStr(date: Date): string {
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+// 本地时区今天 'YYYY-MM-DD'
+export function todayStr(): string {
+  return toDateStr(new Date());
+}
+
+// 含当日的 N 天区间起始日：7 天即今天往前 6 天（与桌面版 daysAgoStr 一致）
+export function daysAgoStr(days: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - (days - 1));
+  return toDateStr(date);
 }

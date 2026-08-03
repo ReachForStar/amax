@@ -1,6 +1,7 @@
 {
   "src": [
     "pages/DashboardPage",
+    "pages/StatsPage",
     "pages/ConfigPage",
     "pages/LoginPage"
   ]
