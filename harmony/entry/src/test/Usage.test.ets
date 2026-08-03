@@ -84,6 +84,7 @@ export default function usageTest() {
       expect(s.peakYuan).assertClose(4.5, 0.000001);
       expect(s.peakDate).assertEqual('2026-08-02');
       expect(s.totalTokens).assertEqual(400);
+      expect(s.daysWithData).assertEqual(2);
     });
     it('avgDividesBySnapshotDaysNotUsageDays', 0, () => {
       // 3 天快照仅 1 天消费 3 元：avg = 3/3 = 1.0（有快照天数口径，对齐桌面版）
@@ -95,9 +96,24 @@ export default function usageTest() {
       ];
       const s = summarizeLocal(snaps);
       expect(s.avgYuan).assertClose(1.0, 0.000001);
+      expect(s.daysWithData).assertEqual(3);
       expect(s.daysWithUsage).assertEqual(1);
       expect(s.peakYuan).assertClose(3.0, 0.000001);
       expect(s.peakDate).assertEqual('2026-08-01');
+    });
+    it('allZeroPeakDateEmpty', 0, () => {
+      // 全 0 时 peakDate 为空串（同桌面版 summarize_local：UI 显示 '--'、导出空串），
+      // 不回退最后快照日期；daysWithData 仍计快照天数
+      const snaps: DailySnapshot[] = [
+        { date: '2026-08-01', yuan: 0, tokens: 0, remaining: 90, requestCount: 1 },
+        { date: '2026-08-02', yuan: 0, tokens: 0, remaining: 90, requestCount: 1 },
+      ];
+      const s = summarizeLocal(snaps);
+      expect(s.peakYuan).assertEqual(0);
+      expect(s.peakDate).assertEqual('');
+      expect(s.daysWithData).assertEqual(2);
+      expect(s.daysWithUsage).assertEqual(0);
+      expect(s.totalYuan).assertEqual(0);
     });
   });
   describe('dateRangeToUnix', () => {
@@ -173,6 +189,22 @@ export default function usageTest() {
       expect(json.includes('"source": "official"')).assertTrue();
       expect(json.includes('"percent_basis": "quota"')).assertTrue();
       expect(json.includes('"new_requests": 10')).assertTrue();
+      expect(json.includes('"days_with_usage": 2')).assertTrue();
+    });
+    it('localEstimateUsesDaysWithDataKey', 0, () => {
+      // 本地估算模式汇总键为 days_with_data（对齐桌面版导出契约），不输出 days_with_usage
+      const data = sampleExportData();
+      data.source = 'local_estimate';
+      data.percent_basis = null;
+      const s: ExportSummary = {
+        total_yuan: 3, avg_yuan: 1, peak_yuan: 3, peak_date: '2026-08-01',
+        total_tokens: 100, request_count: null, days_with_data: 3,
+      };
+      data.summary = s;
+      data.models = [];
+      const json = buildStatsJson(data);
+      expect(json.includes('"days_with_data": 3')).assertTrue();
+      expect(json.includes('days_with_usage')).assertFalse();
     });
   });
 }

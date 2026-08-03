@@ -202,6 +202,13 @@ struct StatsPage {
         if (this.startDate === rangeStart && this.endDate === rangeEnd) {
           return;
         }
+        // 补载守卫：新区间可能是日期编辑的中间态（任一空串视为编辑中，
+        // validateRange 非空为非法）；此时不重载，等待下次合法编辑触发加载，
+        // 避免按非法/半截区间重载并显示误导性降级横幅
+        if (this.startDate.length === 0 || this.endDate.length === 0
+          || validateRange(this.startDate, this.endDate).length > 0) {
+          return;
+        }
         rangeStart = this.startDate;
         rangeEnd = this.endDate;
       }
@@ -392,7 +399,8 @@ struct StatsPage {
       { label: '累计费用', value: formatYuan(s.totalYuan) },
       { label: '日均费用', value: formatYuan(s.avgYuan) },
       { label: '单日峰值', value: s.peakDate.length > 0 ? `${formatYuan(s.peakYuan)}（${s.peakDate}）` : '--' },
-      { label: '有使用天数', value: String(s.daysWithUsage) },
+      // 本地模式"有使用天数"取有快照天数（同桌面版 days_with_data 口径），官方模式才用 daysWithUsage
+      { label: '有使用天数', value: String(s.daysWithData) },
       // 本地快照无法派生区间请求数，降级固定 '--'
       { label: '区间总请求数', value: '--' },
     ];
@@ -480,12 +488,13 @@ struct StatsPage {
         });
       }
     } else {
-      // 本地估算：区间请求数无法从快照派生，request_count 置 null（CSV 跳过该行）
+      // 本地估算：区间请求数无法从快照派生，request_count 置 null（CSV 跳过该行）；
+      // 天数键用 days_with_data（有快照天数），与桌面版本地导出键名一致
       const s = summarizeLocal(this.localSnapshots);
       summary = {
         total_yuan: s.totalYuan, avg_yuan: s.avgYuan, peak_yuan: s.peakYuan,
         peak_date: s.peakDate, total_tokens: s.totalTokens,
-        request_count: null, days_with_usage: s.daysWithUsage,
+        request_count: null, days_with_data: s.daysWithData,
       };
     }
     const range: ExportRange = { start_date: this.startDate, end_date: this.endDate };

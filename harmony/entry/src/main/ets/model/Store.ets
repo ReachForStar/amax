@@ -36,6 +36,9 @@ export interface LocalSummary {
   peakYuan: number;
   peakDate: string;
   totalTokens: number;
+  // 有快照天数（同桌面版 days_with_data，本地模式汇总卡与导出用此口径）
+  daysWithData: number;
+  // 有用量天数（yuan>0 || tokens>0），保留供需要该口径的调用方使用
   daysWithUsage: number;
 }
 
@@ -219,26 +222,23 @@ export function deriveDailyRequests(snapshots: DailySnapshot[]): Array<number | 
 }
 
 // 本地快照区间汇总：avg 除有快照天数（与桌面版 db.rs summarize_local 同口径，
-// 降级模式下日均不偏高）；peak 全 0 回退最后一天（空输入回退空串）
+// 降级模式下日均不偏高）；peakDate 全 0 或空输入保持空串（同桌面版，UI 显示 '--'、导出空串）
 export function summarizeLocal(snapshots: DailySnapshot[]): LocalSummary {
   let totalYuan = 0;
   let totalTokens = 0;
   let daysWithUsage = 0;
   let peakYuan = 0;
-  let peakFound = false;
-  let peakDate = snapshots.length > 0 ? snapshots[snapshots.length - 1].date : '';
+  // 全 0 时不回退快照日期，与桌面版 summarize_local 一致
+  let peakDate = '';
   for (const snap of snapshots) {
     totalYuan += snap.yuan;
     totalTokens += snap.tokens;
     if (snap.yuan > 0 || snap.tokens > 0) {
       daysWithUsage++;
     }
-    if (!peakFound || snap.yuan > peakYuan) {
+    if (snap.yuan > peakYuan) {
       peakYuan = snap.yuan;
-      peakFound = true;
-      if (snap.yuan > 0) {
-        peakDate = snap.date;
-      }
+      peakDate = snap.date;
     }
   }
   // 分母为有快照天数而非有用量天数，空区间返回 0
@@ -249,6 +249,7 @@ export function summarizeLocal(snapshots: DailySnapshot[]): LocalSummary {
     peakYuan: peakYuan,
     peakDate: peakDate,
     totalTokens: totalTokens,
+    daysWithData: snapshots.length,
     daysWithUsage: daysWithUsage,
   };
 }

@@ -17,6 +17,8 @@ export interface ExportRange {
 }
 
 // 区间汇总：官方模式 request_count 为区间总请求数；本地估算无法派生，置 null（CSV 跳过该行）
+// 天数字段键名随模式切换（同桌面版导出契约）：官方模式设 days_with_usage，
+// 本地估算模式设 days_with_data（有快照天数）；未设置的键 JSON.stringify 自动忽略不输出
 export interface ExportSummary {
   total_yuan: number;
   avg_yuan: number;
@@ -24,7 +26,8 @@ export interface ExportSummary {
   peak_date: string;
   total_tokens: number;
   request_count: number | null;
-  days_with_usage: number;
+  days_with_usage?: number;
+  days_with_data?: number;
 }
 
 // 每日明细：官方模式 input/output_tokens 有值，降级为 null；
