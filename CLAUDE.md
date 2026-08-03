@@ -91,8 +91,11 @@ cargo tauri build
 
 `harmony/` 为 AMAX Dashboard 的 HarmonyOS 6 原生适配（ArkTS / ArkUI，Stage 模型），与桌面版共享数据口径与官网接口约定：
 
-- 页面：DashboardPage / ConfigPage（应用内 WebView 登录 + 手动粘贴）/ LoginPage（官网登录页，`onLoadIntercept` 仅对主框架到 `/dashboard` 的重定向判定登录成功，`WebCookieManager.fetchCookieSync` 传完整 URL 提取 Cookie）。
-- model 层与桌面版模块对应：`Api.ets`（同 api.rs 协议与容错）、`Store.ets`（同 db.rs 快照 schema，含 request_count）、`Secret.ets`（HUKS AES-256-GCM 替代 DPAPI，`huks:v1:<base64(iv | 密文 | tag)>` 前缀 + 旧明文兼容）。
+- 页面：DashboardPage（顶栏 📈 入口进统计页）/ StatsPage（区间选择器 7/14/30 天预设 + 自定义起止日期，跨度上限 1096 天；汇总卡、消耗趋势双轴、请求数、模型分布环图、余额趋势四图表；官方失败降级本地估算并标注，模型分布仅官方可用）/ ConfigPage（应用内 WebView 登录 + 手动粘贴）/ LoginPage（官网登录页，`onLoadIntercept` 仅对主框架到 `/dashboard` 的重定向判定登录成功，`WebCookieManager.fetchCookieSync` 传完整 URL 提取 Cookie）。
+- model 层与桌面版模块对应：`Api.ets`（同 api.rs 协议与容错，含 fetchDashboard 与 fetchUsageStats 区间聚合）、`Store.ets`（同 db.rs 快照 schema，含 request_count；按日快照查询 + 累计差分派生请求数 + 本地估算汇总）、`Secret.ets`（HUKS AES-256-GCM 替代 DPAPI，`huks:v1:<base64(iv | 密文 | tag)>` 前缀 + 旧明文兼容）。
+- 统计导出：`common/Export.ets` 组装 CSV / JSON（字段口径对齐桌面版 buildExportData），经系统 DocumentViewPicker 另存；降级模式 input/output_tokens 与区间请求数置 null。图表为 Canvas 自绘 `LineChart` / `DonutChart`；数据就绪递增 chartVersion 触发重绘，ForEach 键须纳入版本号。
+- 低余额通知：`common/Notify.ets`，percent<10 发一次系统通知（模块级标志防重发），回升到阈值及以上重置；前台刷新与后台刷新共用。
+- 后台刷新：`workscheduler/RefreshWorkSchedulerExtension.ets`，退后台时申请 WorkScheduler 延迟任务（NETWORK_TYPE_ANY、非循环、不持久化），系统调度后执行一次完整刷新并重新申请。注意系统调度限制：触发时机按条件调度非精确周期（无法复刻桌面版 10 分钟刷新），频率按应用活跃分组管控（最小间隔 2 小时起），单次回调最长 2 分钟，Extension 运行在独立进程须重新 initStore。
 - HUKS GCM 参数契约（仪器测试验证后的最终形态）：GCM 强制非空 AAD（固定常量，空 AAD 报 401）；解密须以 `HUKS_TAG_AE_TAG` 传入待校验 tag、密文单独送入会话，update 返回 null、明文取自 finish（auth-then-release）；调整 Secret.ets 时不得改回空 AAD 或「密文|tag 合并送 update」的写法。
 - 路由一律 `this.getUIContext().getRouter()` 实例；静态 `router` 接口自 API 18 废弃，异步回调中使用会闪退。
 - 断点自适应：`BreakpointSystem`（sm<600 / 600≤md<840 / lg≥840 vp）+ 内容区 md/lg 限宽 720vp 居中；deviceTypes 为 phone / tablet / 2in1。断点注册须在窗口上屏后（`loadContent` 回调）执行，提前调用 `matchMediaSync` 抛 1300002 会中断启动。
