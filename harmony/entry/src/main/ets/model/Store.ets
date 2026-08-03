@@ -218,7 +218,8 @@ export function deriveDailyRequests(snapshots: DailySnapshot[]): Array<number | 
   return result;
 }
 
-// 本地快照区间汇总：avg 除有使用日天数；peak 全 0 回退最后一天（空输入回退空串）
+// 本地快照区间汇总：avg 除有快照天数（与桌面版 db.rs summarize_local 同口径，
+// 降级模式下日均不偏高）；peak 全 0 回退最后一天（空输入回退空串）
 export function summarizeLocal(snapshots: DailySnapshot[]): LocalSummary {
   let totalYuan = 0;
   let totalTokens = 0;
@@ -240,7 +241,8 @@ export function summarizeLocal(snapshots: DailySnapshot[]): LocalSummary {
       }
     }
   }
-  const avgYuan = daysWithUsage > 0 ? totalYuan / daysWithUsage : 0;
+  // 分母为有快照天数而非有用量天数，空区间返回 0
+  const avgYuan = snapshots.length > 0 ? totalYuan / snapshots.length : 0;
   return {
     totalYuan: totalYuan,
     avgYuan: avgYuan,

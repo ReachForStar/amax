@@ -110,7 +110,7 @@ export interface UsageStats {
   daily: UsageDaily[];
   models: UsageModel[];
   summary: UsageSummary;
-  percentBasis: string;
+  percentBasis: 'quota' | 'tokens';
 }
 
 // by-model 完整响应：顶层即 { summary, models, daily }，无 data 包裹（与 user/self 不同）
@@ -280,7 +280,7 @@ export function aggregateUsage(rawDaily: DailyUsageRaw[], rawModels: ModelUsageR
     totalQuota += m.quota ?? 0;
   }
   const useTokensBasis = totalQuota <= 0;
-  const percentBasis = useTokensBasis ? 'tokens' : 'quota';
+  const percentBasis: 'quota' | 'tokens' = useTokensBasis ? 'tokens' : 'quota';
   let basisTotal = 0;
   for (const m of rawModels) {
     basisTotal += useTokensBasis ? (m.total_tokens ?? 0) : (m.quota ?? 0);
@@ -357,6 +357,11 @@ export async function fetchUsageStats(cookie: string, startDate: string,
   try {
     payload = parseBody<UsageStatsPayload>(logsResp);
   } catch (error) {
+    throw new ApiError('用量数据解析失败');
+  }
+  // HTTP 200 也可能返回 JSON null：parseBody 不抛错，须显式守卫，
+  // 否则后续属性访问抛原生 TypeError 逃逸出错误分级
+  if (!payload) {
     throw new ApiError('用量数据解析失败');
   }
   return aggregateUsage(payload.daily ?? [], payload.models ?? [], startDate, endDate);

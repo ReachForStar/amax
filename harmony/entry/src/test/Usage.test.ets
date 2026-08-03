@@ -82,6 +82,20 @@ export default function usageTest() {
       expect(s.peakDate).assertEqual('2026-08-02');
       expect(s.totalTokens).assertEqual(400);
     });
+    it('avgDividesBySnapshotDaysNotUsageDays', 0, () => {
+      // 3 天快照仅 1 天消费 3 元：avg = 3/3 = 1.0（有快照天数口径，对齐桌面版）
+      // 若误用"有用量天数"口径会得 3.0，本用例区分两种分母
+      const snaps: DailySnapshot[] = [
+        { date: '2026-08-01', yuan: 3, tokens: 100, remaining: 90, requestCount: 1 },
+        { date: '2026-08-02', yuan: 0, tokens: 0, remaining: 89, requestCount: 1 },
+        { date: '2026-08-03', yuan: 0, tokens: 0, remaining: 89, requestCount: 1 },
+      ];
+      const s = summarizeLocal(snaps);
+      expect(s.avgYuan).assertClose(1.0, 0.000001);
+      expect(s.daysWithUsage).assertEqual(1);
+      expect(s.peakYuan).assertClose(3.0, 0.000001);
+      expect(s.peakDate).assertEqual('2026-08-01');
+    });
   });
   describe('dateRangeToUnix', () => {
     it('localTimezoneBoundaries', 0, () => {
