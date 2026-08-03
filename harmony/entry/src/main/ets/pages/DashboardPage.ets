@@ -69,6 +69,17 @@ struct DashboardPage {
     }
   }
 
+  // 顶栏 📈 入口：压栈进入统计页（保留看板页以便返回）
+  private async openStats(): Promise<void> {
+    try {
+      await this.getUIContext().getRouter().pushUrl({ url: 'pages/StatsPage' });
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : JSON.stringify(error);
+      console.error(`跳转统计页失败：${reason}`);
+      this.errorMsg = '跳转统计页失败，请重试';
+    }
+  }
+
   async refresh(): Promise<void> {
     if (this.refreshInFlight) {
       return;
@@ -133,6 +144,8 @@ struct DashboardPage {
               Text(this.lastUpdatedText).fontSize(10).fontColor(Theme.muted)
               Text('⟳').fontSize(18).fontColor(Theme.muted).margin({ left: 12 })
                 .onClick(() => this.refresh())
+              Text('📈').fontSize(16).fontColor(Theme.muted).margin({ left: 12 })
+                .onClick(() => this.openStats())
               Text('⚙').fontSize(16).fontColor(Theme.muted).margin({ left: 12 })
                 .onClick(() => this.openConfig())
             }
