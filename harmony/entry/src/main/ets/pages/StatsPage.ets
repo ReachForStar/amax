@@ -154,7 +154,9 @@ struct StatsPage {
     this.loadStats();
   }
 
-  // 加载当前区间统计：官方聚合 + 本地快照两数据源，官方失败降级不阻塞本地数据
+  // 加载当前区间统计：官方聚合 + 本地快照并行拉取；
+  // 区间在加载开始时快照为局部常量，两查询共用；加载期间区间被改写
+  // （该次编辑的加载被 refreshInFlight 丢弃）时，完成后按新区间补载，保证数据与 UI 区间一致
   private async loadStats(): Promise<void> {
     if (this.refreshInFlight) {
       return;
@@ -172,36 +174,71 @@ struct StatsPage {
         await this.gotoConfig();
         return;
       }
-      try {
-        this.official = await fetchUsageStats(cookie, this.startDate, this.endDate);
-        this.degraded = false;
-        this.errorMsg = '';
-      } catch (error) {
-        if (error instanceof ApiError && error.isAuthError) {
+      let rangeStart = this.startDate;
+      let rangeEnd = this.endDate;
+      for (;;) {
+        const authFailed = await this.loadOnce(cookie, rangeStart, rangeEnd);
+        if (authFailed) {
           await this.gotoConfig();
           return;
         }
-        // 非认证错误降级本地估算，保留页面可用性，失败原因供横幅与模型块展示
-        this.official = null;
-        this.degraded = true;
-        this.errorMsg = error instanceof ApiError ? error.message : '请求失败，请重试';
+        // 区间未变 → 结束；区间已变（在途加载期间切换预设/编辑日期）→ 按新区间再载一次
+        if (this.startDate === rangeStart && this.endDate === rangeEnd) {
+          return;
+        }
+        rangeStart = this.startDate;
+        rangeEnd = this.endDate;
       }
-      try {
-        this.localSnapshots = await getDailySnapshots(this.startDate, this.endDate);
-        this.localFailed = false;
-      } catch (error) {
-        // 本地快照查询失败不阻断主流程：兜底空数组，依赖图表整块隐藏
-        const reason = error instanceof Error ? error.message : JSON.stringify(error);
-        console.error(`本地快照查询失败：${reason}`);
-        this.localSnapshots = [];
-        this.localFailed = true;
-      }
-      this.dailyRequests = deriveDailyRequests(this.localSnapshots);
-      // 数据就绪后统一递增版本号，触发全部图表重绘
-      this.chartVersion++;
     } finally {
       this.loading = false;
       this.refreshInFlight = false;
+    }
+  }
+
+  // 单次加载：两数据源并行，避免官方超时推迟本地降级呈现；两查询共用同一区间快照；
+  // 返回是否遇到认证错误（导航统一在两源都落定后执行）
+  private async loadOnce(cookie: string, startDate: string, endDate: string): Promise<boolean> {
+    const officialTask = this.loadOfficial(cookie, startDate, endDate);
+    const localTask = this.loadLocal(startDate, endDate);
+    await Promise.all([officialTask, localTask]);
+    if (await officialTask) {
+      return true;
+    }
+    this.dailyRequests = deriveDailyRequests(this.localSnapshots);
+    // 数据就绪后统一递增版本号，触发图表重绘与 ForEach 键值更新
+    this.chartVersion++;
+    return false;
+  }
+
+  // 官方聚合任务：返回是否遇到认证错误
+  private async loadOfficial(cookie: string, startDate: string, endDate: string): Promise<boolean> {
+    try {
+      this.official = await fetchUsageStats(cookie, startDate, endDate);
+      this.degraded = false;
+      this.errorMsg = '';
+      return false;
+    } catch (error) {
+      if (error instanceof ApiError && error.isAuthError) {
+        return true;
+      }
+      // 非认证错误降级本地估算，保留页面可用性，失败原因供横幅与模型块展示
+      this.official = null;
+      this.degraded = true;
+      this.errorMsg = error instanceof ApiError ? error.message : '请求失败，请重试';
+      return false;
+    }
+  }
+
+  // 本地快照任务：失败兜底空数组并记录 localFailed，不阻断主流程
+  private async loadLocal(startDate: string, endDate: string): Promise<void> {
+    try {
+      this.localSnapshots = await getDailySnapshots(startDate, endDate);
+      this.localFailed = false;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : JSON.stringify(error);
+      console.error(`本地快照查询失败：${reason}`);
+      this.localSnapshots = [];
+      this.localFailed = true;
     }
   }
 
@@ -307,6 +344,11 @@ struct StatsPage {
       : '按费用占比';
   }
 
+  // 当前模型列表（@Builder 内部直读状态，规避按值传参不刷新问题，见 faqs-arkui-375）
+  private currentModels(): UsageModel[] {
+    return this.official !== null ? this.official.models : [];
+  }
+
   // 汇总卡：官方模式用官方汇总；降级用本地估算且请求数固定 '--'；
   // 降级且本地查询也失败时全部 '--'
   private summaryCells(): SummaryCell[] {
@@ -357,10 +399,12 @@ struct StatsPage {
   }
 
   // 模型列表行（sm 纵向 / md/lg 横排两种布局共用）
+  // 无参直读状态：@Builder 按值传参不随状态变化刷新（faqs-arkui-375）；
+  // ForEach 键纳入 chartVersion：区间切换后共有模型数值必须刷新（faqs-arkui-619）
   @Builder
-  modelListRows(models: UsageModel[]) {
+  modelListRows() {
     Column({ space: 8 }) {
-      ForEach(models, (model: UsageModel, index: number) => {
+      ForEach(this.currentModels(), (model: UsageModel, index: number) => {
         Row({ space: 8 }) {
           Row()
             .width(8).height(8).borderRadius(4)
@@ -373,19 +417,19 @@ struct StatsPage {
             .fontFamily(Theme.fontMono).fontSize(10).fontColor(Theme.muted)
         }
         .width('100%')
-      }, (model: UsageModel, index: number): string => `${index}-${model.model}`)
+      }, (model: UsageModel, index: number): string => `${this.chartVersion}-${index}-${model.model}`)
     }
     .width('100%')
   }
 
-  // 模型分布主体：sm 环图在上列表在下，md/lg 环图左列表右
+  // 模型分布主体：sm 环图在上列表在下，md/lg 环图左列表右（无参直读状态，同上）
   @Builder
-  modelBody(models: UsageModel[]) {
+  modelBody() {
     if (this.bp === 'sm') {
       Column({ space: 12 }) {
         DonutChart({ segments: this.modelSegments(), version: this.chartVersion })
           .width('100%').height(170)
-        this.modelListRows(models)
+        this.modelListRows()
       }
       .width('100%')
     } else {
@@ -393,7 +437,7 @@ struct StatsPage {
         DonutChart({ segments: this.modelSegments(), version: this.chartVersion })
           .width(200).height(190)
         Column() {
-          this.modelListRows(models)
+          this.modelListRows()
         }
         .layoutWeight(1)
       }
@@ -429,6 +473,7 @@ struct StatsPage {
           .width('100%').padding({ top: 14, bottom: 14 })
 
           // 区间选择器：预设按钮（选中态 accentSoft）
+          // 键纳入 rangeDays：选中高亮随 rangeDays 变化，键恒定则复用旧项不刷新（faqs-arkui-619）
           Row({ space: 8 }) {
             ForEach(PRESET_DAYS, (days: number) => {
               Text(`${days} 天`)
@@ -438,7 +483,7 @@ struct StatsPage {
                 .border({ width: 1, color: this.rangeDays === days ? Theme.accent : Theme.line })
                 .padding({ left: 12, right: 12, top: 5, bottom: 5 })
                 .onClick(() => this.applyPreset(days))
-            }, (days: number): string => String(days))
+            }, (days: number): string => `${this.rangeDays}-${days}`)
           }
           .width('100%')
 
@@ -494,8 +539,12 @@ struct StatsPage {
           if (this.official !== null || this.degraded) {
             // 汇总卡
             Column({ space: 10 }) {
-              this.blockTitle(this.degraded ? 'RANGE SUMMARY（本地估算）' : 'RANGE SUMMARY')
+              // 调用点直写 Text 读取 this.degraded：@Builder 按值传参不随状态变化刷新（faqs-arkui-375）
+              Text(this.degraded ? 'RANGE SUMMARY（本地估算）' : 'RANGE SUMMARY')
+                .fontFamily(Theme.fontMono).fontSize(10).fontWeight(FontWeight.Bold)
+                .fontColor(Theme.muted).letterSpacing(2)
               Flex({ wrap: FlexWrap.Wrap }) {
+                // 键纳入 chartVersion：label 恒定 value 变化时必须换键才会刷新（faqs-arkui-619）
                 ForEach(this.summaryCells(), (cell: SummaryCell, index: number) => {
                   Column({ space: 4 }) {
                     Text(cell.label).fontSize(10).fontColor(Theme.muted)
@@ -505,7 +554,7 @@ struct StatsPage {
                   .alignItems(HorizontalAlign.Start)
                   .width(this.bp === 'sm' ? '50%' : '20%')
                   .padding({ top: 8, bottom: 8, right: 10 })
-                }, (cell: SummaryCell, index: number): string => `${index}-${cell.label}`)
+                }, (cell: SummaryCell, index: number): string => `${this.chartVersion}-${index}`)
               }
               .width('100%')
             }
@@ -570,7 +619,7 @@ struct StatsPage {
                   .fontSize(12).fontColor(Theme.muted)
                   .width('100%').padding({ top: 8, bottom: 8 })
               } else if (this.official !== null) {
-                this.modelBody(this.official.models)
+                this.modelBody()
               }
             }
             .width('100%').padding({ top: 20, bottom: 20 })
