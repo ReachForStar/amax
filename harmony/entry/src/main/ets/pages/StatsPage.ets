@@ -9,6 +9,11 @@ import { GridBackground } from '../common/GridBackground';
 import { ApiError, formatYuan, todayStr, daysAgoStr } from '../common/Format';
 import { LineChart, ChartSeries } from '../common/LineChart';
 import { DonutChart, DonutSegment } from '../common/DonutChart';
+import {
+  buildStatsCsv, buildStatsJson, saveTextFile, ExportCancelledError,
+  ExportData, ExportDaily, ExportModel, ExportRange, ExportSummary,
+} from '../common/Export';
+import { common } from '@kit.AbilityKit';
 import { fetchUsageStats, UsageStats, UsageModel } from '../model/Api';
 import {
   getCookie, getDailySnapshots, deriveDailyRequests, summarizeLocal, DailySnapshot,
@@ -33,6 +38,12 @@ const MAX_RANGE_DAYS = 1096;
 interface SummaryCell {
   label: string;
   value: string;
+}
+
+// 导出时本地快照按日期合并的字段：新增请求数（累计差分）与日末余额
+interface LocalExportMerge {
+  newRequests: number | null;
+  remaining: number;
 }
 
 // 解析 'YYYY-MM-DD' 为本地时区日期；格式非法或日期不存在（如 2026-02-30 滚动进位）返回 null
@@ -95,9 +106,13 @@ struct StatsPage {
   @State errorMsg: string = '';
   @State loading: boolean = false;
   @State chartVersion: number = 0;                 // 数据变化递增，触发图表重绘
+  @State exportMsg: string = '';                   // 导出结果反馈（成功/取消/失败），新加载时清空
+  @State exportMsgTone: string = 'ok';             // ok=成功 accent / muted=取消 / error=失败
   // 刷新串行标志：onPageShow / 预设切换 / 日期输入并发触发时仅首个执行，
   // 对齐看板页 refreshInFlight 模式，避免重复网络请求
   private refreshInFlight: boolean = false;
+  // 导出串行标志：防止连点重复拉起系统 Picker
+  private exportInFlight: boolean = false;
 
   async onPageShow(): Promise<void> {
     // 页面打开即加载；返回重进重新加载可接受（brief 明确不节流）
@@ -164,6 +179,7 @@ struct StatsPage {
     this.refreshInFlight = true;
     try {
       this.loading = true;
+      this.exportMsg = '';
       let cookie: string;
       try {
         cookie = (await getCookie()) ?? '';
@@ -390,6 +406,147 @@ struct StatsPage {
     return large ? 240 : 180;
   }
 
+  // ---- 导出：组装当前数据为统一结构，经系统 Picker 另存 CSV / JSON ----
+
+  // 有可导出数据：官方数据存在，或本地快照至少一条（对齐桌面版 hasData 判定）
+  private hasExportData(): boolean {
+    return this.official !== null || this.localSnapshots.length > 0;
+  }
+
+  // 按钮可用性：有数据且无导出任务进行中
+  private exportEnabled(): boolean {
+    return this.hasExportData() && !this.exportInFlight;
+  }
+
+  // 组装当前页面数据为统一导出结构（同桌面版 buildExportData 口径）：
+  // 官方模式以官方数据为主体、按日期合并本地 new_requests/remaining；
+  // 降级模式用本地快照，input/output_tokens 与区间请求数无法派生置 null，models 空数组
+  private buildExportData(): ExportData {
+    // 本地快照索引：日期 → 新增请求数（累计差分）与日末余额
+    const localByDate = new Map<string, LocalExportMerge>();
+    for (let i = 0; i < this.localSnapshots.length; i++) {
+      const snap = this.localSnapshots[i];
+      const merge: LocalExportMerge = {
+        newRequests: i < this.dailyRequests.length ? this.dailyRequests[i] : null,
+        remaining: snap.remaining,
+      };
+      localByDate.set(snap.date, merge);
+    }
+    const daily: ExportDaily[] = [];
+    if (this.official !== null) {
+      for (const day of this.official.daily) {
+        const merge = localByDate.get(day.date);
+        const row: ExportDaily = {
+          date: day.date,
+          yuan: day.yuan,
+          tokens: day.tokens,
+          input_tokens: day.inputTokens,
+          output_tokens: day.outputTokens,
+          new_requests: merge !== undefined ? merge.newRequests : null,
+          remaining: merge !== undefined ? merge.remaining : null,
+        };
+        daily.push(row);
+      }
+    } else {
+      for (const snap of this.localSnapshots) {
+        const merge = localByDate.get(snap.date);
+        const row: ExportDaily = {
+          date: snap.date,
+          yuan: snap.yuan,
+          tokens: snap.tokens,
+          input_tokens: null,
+          output_tokens: null,
+          new_requests: merge !== undefined ? merge.newRequests : null,
+          remaining: snap.remaining,
+        };
+        daily.push(row);
+      }
+    }
+    let summary: ExportSummary;
+    let percentBasis: string | null = null;
+    const models: ExportModel[] = [];
+    if (this.official !== null) {
+      const s = this.official.summary;
+      summary = {
+        total_yuan: s.totalYuan, avg_yuan: s.avgYuan, peak_yuan: s.peakYuan,
+        peak_date: s.peakDate, total_tokens: s.totalTokens,
+        request_count: s.requestCount, days_with_usage: s.daysWithUsage,
+      };
+      percentBasis = this.official.percentBasis;
+      for (const m of this.official.models) {
+        models.push({
+          model: m.model, yuan: m.yuan, tokens: m.tokens,
+          request_count: m.requestCount, percent: m.percent,
+        });
+      }
+    } else {
+      // 本地估算：区间请求数无法从快照派生，request_count 置 null（CSV 跳过该行）
+      const s = summarizeLocal(this.localSnapshots);
+      summary = {
+        total_yuan: s.totalYuan, avg_yuan: s.avgYuan, peak_yuan: s.peakYuan,
+        peak_date: s.peakDate, total_tokens: s.totalTokens,
+        request_count: null, days_with_usage: s.daysWithUsage,
+      };
+    }
+    const range: ExportRange = { start_date: this.startDate, end_date: this.endDate };
+    const data: ExportData = {
+      app: 'amax-dashboard',
+      exported_at: new Date().toISOString(),
+      range: range,
+      source: this.official !== null ? 'official' : 'local_estimate',
+      percent_basis: percentBasis,
+      summary: summary,
+      daily: daily,
+      models: models,
+    };
+    return data;
+  }
+
+  // 导出入口（format 仅 'csv' / 'json'）：生成文本后经系统 Picker 另存；
+  // 成功/取消/失败均页面提示，不静默吞错；串行标志防连点重复拉起 Picker
+  private async exportData(format: string): Promise<void> {
+    if (!this.exportEnabled()) {
+      return;
+    }
+    this.exportInFlight = true;
+    this.exportMsg = '';
+    try {
+      const data = this.buildExportData();
+      const isCsv = format === 'csv';
+      const content = isCsv ? buildStatsCsv(data) : buildStatsJson(data);
+      const mime = isCsv ? 'text/csv' : 'application/json';
+      const fileName = `amax-stats_${this.startDate}_to_${this.endDate}.${format}`;
+      // Picker 必须在组件上下文中创建；getHostContext 异常时兜底报错
+      const hostContext = this.getUIContext().getHostContext();
+      if (hostContext === undefined) {
+        throw new Error('无法获取应用上下文');
+      }
+      await saveTextFile(hostContext as common.UIAbilityContext, fileName, content, mime);
+      this.exportMsg = isCsv ? 'CSV 导出成功' : 'JSON 导出成功';
+      this.exportMsgTone = 'ok';
+    } catch (error) {
+      if (error instanceof ExportCancelledError) {
+        this.exportMsg = '已取消保存';
+        this.exportMsgTone = 'muted';
+      } else {
+        const reason = error instanceof Error ? error.message : JSON.stringify(error);
+        console.error(`导出失败：${reason}`);
+        this.exportMsg = `导出失败：${reason}`;
+        this.exportMsgTone = 'error';
+      }
+    } finally {
+      this.exportInFlight = false;
+    }
+  }
+
+  // 导出反馈文字颜色：成功 accent / 取消灰 / 失败红
+  private exportMsgColor(): string {
+    if (this.exportMsgTone === 'error') {
+      return Theme.error;
+    }
+    return this.exportMsgTone === 'muted' ? Theme.muted : Theme.accent;
+  }
+
   // 区块标题（等宽小号大写，与看板页风格一致）
   @Builder
   blockTitle(title: string) {
@@ -450,7 +607,7 @@ struct StatsPage {
       GridBackground()
       Scroll() {
         Column({ space: 0 }) {
-          // 顶栏：标题 + 导出（P4 接线）+ 返回看板
+          // 顶栏：标题 + 导出（CSV / JSON 并排）+ 返回看板
           Row() {
             Text('AMAX / ANALYTICS')
               .fontFamily(Theme.fontMono).fontSize(12).fontWeight(FontWeight.Bold)
@@ -459,18 +616,36 @@ struct StatsPage {
             if (this.loading) {
               Text('加载中…').fontSize(10).fontColor(Theme.muted).margin({ right: 12 })
             }
-            // 导出按钮：本任务仅占位并禁用，CSV/JSON/XLSX 导出由 P4 任务接线启用
-            Text('导出')
-              .fontFamily(Theme.fontMono).fontSize(10).fontColor(Theme.muted)
-              .border({ width: 1, color: Theme.line })
+            // 导出按钮：无数据或导出进行中禁用；保存结果经 exportMsg 反馈
+            Text('CSV')
+              .fontFamily(Theme.fontMono).fontSize(10)
+              .fontColor(this.exportEnabled() ? Theme.accent : Theme.muted)
+              .border({ width: 1, color: this.exportEnabled() ? Theme.accent : Theme.line })
               .padding({ left: 10, right: 10, top: 4, bottom: 4 })
-              .opacity(0.45)
-              .enabled(false)
+              .opacity(this.exportEnabled() ? 1 : 0.45)
+              .enabled(this.exportEnabled())
+              .onClick(() => this.exportData('csv'))
+            Text('JSON')
+              .fontFamily(Theme.fontMono).fontSize(10)
+              .fontColor(this.exportEnabled() ? Theme.accent : Theme.muted)
+              .border({ width: 1, color: this.exportEnabled() ? Theme.accent : Theme.line })
+              .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+              .margin({ left: 8 })
+              .opacity(this.exportEnabled() ? 1 : 0.45)
+              .enabled(this.exportEnabled())
+              .onClick(() => this.exportData('json'))
             Text('返回看板')
               .fontSize(11).fontColor(Theme.muted).margin({ left: 12 })
               .onClick(() => this.goBack())
           }
           .width('100%').padding({ top: 14, bottom: 14 })
+
+          // 导出结果反馈：成功 / 取消 / 失败，新加载时清空
+          if (this.exportMsg.length > 0) {
+            Text(this.exportMsg)
+              .fontSize(11).fontColor(this.exportMsgColor())
+              .width('100%').margin({ top: 8 })
+          }
 
           // 区间选择器：预设按钮（选中态 accentSoft）
           // 键纳入 rangeDays：选中高亮随 rangeDays 变化，键恒定则复用旧项不刷新（faqs-arkui-619）
