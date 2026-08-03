@@ -394,7 +394,7 @@ struct StatsPage {
   @Builder
   blockTitle(title: string) {
     Text(title)
-      .fontFamily(Theme.fontMono).fontSize(10).fontWeight(FontWeight.Bold)
+      .fontFamily(Theme.fontMono).fontSize(12).fontWeight(FontWeight.Bold)
       .fontColor(Theme.muted).letterSpacing(2)
   }
 
@@ -453,7 +453,7 @@ struct StatsPage {
           // 顶栏：标题 + 导出（P4 接线）+ 返回看板
           Row() {
             Text('AMAX / ANALYTICS')
-              .fontFamily(Theme.fontMono).fontSize(10).fontWeight(FontWeight.Bold)
+              .fontFamily(Theme.fontMono).fontSize(12).fontWeight(FontWeight.Bold)
               .fontColor(Theme.accent).letterSpacing(2)
             Blank()
             if (this.loading) {
@@ -541,7 +541,7 @@ struct StatsPage {
             Column({ space: 10 }) {
               // 调用点直写 Text 读取 this.degraded：@Builder 按值传参不随状态变化刷新（faqs-arkui-375）
               Text(this.degraded ? 'RANGE SUMMARY（本地估算）' : 'RANGE SUMMARY')
-                .fontFamily(Theme.fontMono).fontSize(10).fontWeight(FontWeight.Bold)
+                .fontFamily(Theme.fontMono).fontSize(12).fontWeight(FontWeight.Bold)
                 .fontColor(Theme.muted).letterSpacing(2)
               Flex({ wrap: FlexWrap.Wrap }) {
                 // 键纳入 chartVersion：label 恒定 value 变化时必须换键才会刷新（faqs-arkui-619）

@@ -58,7 +58,7 @@ export struct DonutChart {
     if (total <= 0) {
       // 总和为 0：整环 line 色 + 中心"暂无数据"
       this.drawRingSegment(cx, cy, outer, inner, 0, Math.PI * 2, Theme.line);
-      this.drawCenterText('暂无数据', cx, cy, Theme.muted, 12);
+      this.drawCenterText('暂无数据', cx, cy, Theme.muted, 13);
       return;
     }
 
@@ -75,7 +75,7 @@ export struct DonutChart {
     }
 
     if (this.centerText.length > 0) {
-      this.drawCenterText(this.centerText, cx, cy, Theme.ink, 14);
+      this.drawCenterText(this.centerText, cx, cy, Theme.ink, 16);
     }
   }
 
@@ -91,7 +91,8 @@ export struct DonutChart {
   }
 
   private drawCenterText(text: string, cx: number, cy: number, color: string, size: number): void {
-    this.ctx.font = `${size}px monospace`;
+    // Canvas 坐标为 vp 而 font 按物理 px 解释，经 vp2px 换算保证可见尺寸
+    this.ctx.font = `${Math.round(this.getUIContext().vp2px(size))}px monospace`;
     this.ctx.fillStyle = color;
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'middle';

@@ -119,9 +119,14 @@ export struct LineChart {
     }
   }
 
+  // Canvas 坐标为 vp 而 font 属性按物理 px 解释，须经 vp2px 换算，否则高分屏文字极小不可见
+  private fontOf(vp: number): string {
+    return `${Math.round(this.getUIContext().vp2px(vp))}px monospace`;
+  }
+
   // 空数据：居中"暂无数据"
   private drawEmpty(layout: ChartLayout): void {
-    this.ctx.font = '12px monospace';
+    this.ctx.font = this.fontOf(12);
     this.ctx.fillStyle = Theme.muted;
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'middle';
@@ -178,7 +183,7 @@ export struct LineChart {
 
   // y 轴刻度文本：左轴 ¥ toFixed(2)；双轴时右轴 formatTokens
   private drawYTicks(layout: ChartLayout, leftMax: number, rightMax: number): void {
-    this.ctx.font = '9px monospace';
+    this.ctx.font = this.fontOf(11);
     this.ctx.fillStyle = Theme.muted;
     this.ctx.textBaseline = 'middle';
     this.ctx.textAlign = 'right';
@@ -201,12 +206,16 @@ export struct LineChart {
   private drawXLabels(layout: ChartLayout): void {
     const n = this.labels.length;
     const step = Math.max(1, Math.ceil(n / MAX_X_LABELS));
-    this.ctx.font = '9px monospace';
+    this.ctx.font = this.fontOf(11);
     this.ctx.fillStyle = Theme.muted;
     this.ctx.textAlign = 'center';
     this.ctx.textBaseline = 'top';
     for (let i = 0; i < n; i += step) {
-      this.ctx.fillText(this.labels[i], this.xAt(layout, i), layout.plotY + layout.plotH + 6);
+      // 日期类标签（YYYY-MM-DD）取 MM-DD 短形，避免放大字号后横向重叠
+      const text = this.labels[i].length === 10 && this.labels[i][4] === '-'
+        ? this.labels[i].slice(5)
+        : this.labels[i];
+      this.ctx.fillText(text, this.xAt(layout, i), layout.plotY + layout.plotH + 6);
     }
   }
 
@@ -283,10 +292,10 @@ export struct LineChart {
     }
 
     // 浮层尺寸：按最长行测量 + 四周内边距
-    this.ctx.font = '10px monospace';
+    this.ctx.font = this.fontOf(11);
     const padX = 8;
     const padY = 6;
-    const lineH = 14;
+    const lineH = 15;
     let boxW = 0;
     for (const line of lines) {
       boxW = Math.max(boxW, this.ctx.measureText(line.text).width);
