@@ -137,10 +137,11 @@ export async function saveTextFile(context: common.UIAbilityContext, fileName: s
     throw new ExportCancelledError();
   }
   const uri = uris[0];
-  // Picker 已预置空文件并授予临时读写权限；各步骤异常显式包装，便于调用方提示原因
+  // Picker 已预置空文件并授予临时读写权限；各步骤异常显式包装，便于调用方提示原因。
+  // TRUNC：覆盖已有文件时先截断，避免旧尾部字节残留导致导出文件静默损坏（对齐桌面全量覆盖语义）
   let file: fileIo.File;
   try {
-    file = fileIo.openSync(uri, fileIo.OpenMode.READ_WRITE);
+    file = fileIo.openSync(uri, fileIo.OpenMode.READ_WRITE | fileIo.OpenMode.TRUNC);
   } catch (error) {
     const reason = error instanceof Error ? error.message : JSON.stringify(error);
     throw new Error(`打开保存文件失败：${reason}`);
