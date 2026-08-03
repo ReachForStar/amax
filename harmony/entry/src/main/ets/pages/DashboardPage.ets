@@ -6,23 +6,12 @@
 //    无效凭据 → 与认证错误同路径导航回 ConfigPage，不允许启动路径崩溃。
 import { Theme } from '../common/Theme';
 import { GridBackground } from '../common/GridBackground';
-import { formatTokens, formatYuan, ApiError } from '../common/Format';
+import { formatTokens, formatYuan, ApiError, localRfc3339 } from '../common/Format';
+import { checkLowQuota } from '../common/Notify';
 import { getCookie, saveSnapshot } from '../model/Store';
 import { fetchDashboard, DashboardData } from '../model/Api';
 
 const AUTO_REFRESH_INTERVAL_MS = 60_000; // onPageShow 自动刷新节流
-
-// 本地时区 RFC3339：动态计算偏移，任意时区正确（与桌面版 Local::now().to_rfc3339() 同口径）
-function localRfc3339(date: Date): string {
-  const offsetMin = -date.getTimezoneOffset();
-  const sign = offsetMin >= 0 ? '+' : '-';
-  const abs = Math.abs(offsetMin);
-  const hh = String(Math.floor(abs / 60)).padStart(2, '0');
-  const mm = String(abs % 60).padStart(2, '0');
-  const pad = (n: number): string => String(n).padStart(2, '0');
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
-    `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${sign}${hh}:${mm}`;
-}
 
 @Entry
 @Component
@@ -112,6 +101,8 @@ struct DashboardPage {
           total: data.total,
           requestCount: data.requestCount,
         });
+        // 刷新成功后检查低余额：内部自带 try/catch，失败仅记日志，不会把刷新置为失败
+        await checkLowQuota(data.percent, data.remaining, data.total);
       } catch (error) {
         if (error instanceof ApiError && error.isAuthError) {
           await this.gotoConfig();

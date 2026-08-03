@@ -46,6 +46,13 @@
             "resource": "$profile:backup_config"
           }
         ],
+      },
+      {
+        // 延迟任务后台刷新扩展：type 取值 'workScheduler'（文档查证 module-configuration-file）
+        "name": "RefreshWorkSchedulerExtension",
+        "srcEntry": "./ets/workscheduler/RefreshWorkSchedulerExtension.ets",
+        "type": "workScheduler",
+        "exported": false,
       }
     ],
     // 网络请求由 ArkTS http 发起，需申请 INTERNET 权限（system_grant，无需弹窗）

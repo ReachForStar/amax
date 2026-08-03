@@ -18,6 +18,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { initStore, getCookie } from '../model/Store';
 import { BreakpointSystem } from '../common/BreakpointSystem';
+import { scheduleBackgroundRefresh } from '../workscheduler/RefreshWorkSchedulerExtension';
 
 const DOMAIN = 0x0000;
 
@@ -100,5 +101,8 @@ export default class EntryAbility extends UIAbility {
   onBackground(): void {
     // Ability has back to background
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onBackground');
+    // 退后台时申请延迟刷新任务（内部先 stopWork 防重复，自带 try/catch）。
+    // 触发时机由系统按条件调度（非精确周期，最小间隔 2 小时起），仅用于机会性后台快照积累
+    scheduleBackgroundRefresh();
   }
 }
