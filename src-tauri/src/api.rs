@@ -219,7 +219,7 @@ fn aggregate_usage(response: UsageResponse, start: NaiveDate, end: NaiveDate) ->
 
     // 一致性校验：补零后累计应等于 summary 上报值
     if (total_tokens - response.summary.total_tokens).abs() > 0 {
-        eprintln!(
+        log::warn!(
             "官方用量聚合 Token 累计({total_tokens})与 summary({})不一致，保留按日聚合值",
             response.summary.total_tokens
         );
@@ -315,45 +315,44 @@ async fn fetch_user_info(client: &reqwest::Client, cookie: &str) -> Result<UserI
     Ok(envelope.data)
 }
 
-pub async fn fetch_dashboard(
-    client: &reqwest::Client,
-    cookie: &str,
-) -> Result<DashboardData, String> {
-    if cookie.is_empty() {
-        return Err("认证失败: 未配置 Cookie".into());
-    }
+/// 当日用量查询结果（by-model 失败时保留账户额度数据，不致命）
+#[derive(Default)]
+struct TodayUsage {
+    summary: UsageSummary,
+    log_count: Option<usize>,
+    logs_available: bool,
+}
 
+/// 查询当日用量汇总；失败仅记录日志并返回空值，不向上抛错（与账户额度解耦）
+async fn fetch_today_usage(client: &reqwest::Client, cookie: &str, user_id: i64) -> TodayUsage {
     let now = Local::now();
-    let start_time = Local
+    let Some(start_time) = Local
         .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
         .single()
-        .ok_or_else(|| "无法计算本地日期起点".to_string())?
-        .timestamp();
-    let end_time = Local
+        .map(|dt| dt.timestamp())
+    else {
+        log::error!("无法计算本地日期起点，跳过当日用量查询");
+        return TodayUsage::default();
+    };
+    let Some(end_time) = Local
         .with_ymd_and_hms(now.year(), now.month(), now.day(), 23, 59, 59)
         .single()
-        .ok_or_else(|| "无法计算本地日期终点".to_string())?
-        .timestamp();
-    let user = fetch_user_info(client, cookie).await?;
-    let total_quota = user.quota.saturating_add(user.used_quota);
-    let remaining = user.quota as f64 / QUOTA_PER_YUAN;
-    let used = user.used_quota as f64 / QUOTA_PER_YUAN;
-    let total = total_quota as f64 / QUOTA_PER_YUAN;
-    let percent = if total_quota > 0 {
-        (user.quota as f64 / total_quota as f64 * 100.0).clamp(0.0, 100.0)
-    } else {
-        0.0
+        .map(|dt| dt.timestamp())
+    else {
+        log::error!("无法计算本地日期终点，跳过当日用量查询");
+        return TodayUsage::default();
     };
 
     let mut summary = UsageSummary::default();
     let mut logs_available = false;
+    let mut log_count: Option<usize> = None;
     let response = client
         .post(format!("{BASE_URL}/v1/logs/token-usage/by-model"))
         .header("Cookie", cookie)
         .json(&serde_json::json!({
             "start_time": start_time,
             "end_time": end_time,
-            "user_id": user.id.to_string(),
+            "user_id": user_id.to_string(),
             "status": "success",
         }))
         .send()
@@ -372,16 +371,25 @@ pub async fn fetch_dashboard(
                 Ok(bytes) => match serde_json::from_slice::<UsageResponse>(&bytes) {
                     Ok(payload) => {
                         summary = payload.summary;
+                        // 当日成功请求数 = 各模型 request_count 之和（与统计页口径一致）
+                        log_count = Some(
+                            payload
+                                .models
+                                .iter()
+                                .map(|m| m.request_count)
+                                .sum::<i64>()
+                                .max(0) as usize,
+                        );
                         logs_available = true;
                     }
                     Err(error) => {
                         let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]);
-                        eprintln!(
+                        log::error!(
                             "日志汇总 JSON 解析失败，保留账户额度数据: status={status}, content-type={content_type}, body={preview:?}, error={error}"
                         );
                     }
                 },
-                Err(error) => eprintln!(
+                Err(error) => log::error!(
                     "读取日志汇总响应失败，保留账户额度数据: status={status}, content-type={content_type}, error={error}"
                 ),
             }
@@ -393,27 +401,85 @@ pub async fn fetch_dashboard(
                 .await
                 .unwrap_or_else(|error| format!("无法读取错误响应: {error}"));
             let preview: String = detail.chars().take(512).collect();
-            eprintln!(
+            log::error!(
                 "日志汇总查询返回异常状态，保留账户额度数据: status={status}, body={preview:?}"
             );
         }
-        Err(error) => eprintln!("日志汇总查询失败，保留账户额度数据: {error}"),
+        Err(error) => log::error!("日志汇总查询失败，保留账户额度数据: {error}"),
     }
 
-    Ok(DashboardData {
+    TodayUsage {
+        summary,
+        log_count,
+        logs_available,
+    }
+}
+
+/// 由账户信息与当日用量组装看板数据（纯函数，便于测试）
+fn assemble_dashboard(user: UserInfo, usage: TodayUsage) -> DashboardData {
+    let total_quota = user.quota.saturating_add(user.used_quota);
+    let remaining = user.quota as f64 / QUOTA_PER_YUAN;
+    let used = user.used_quota as f64 / QUOTA_PER_YUAN;
+    let total = total_quota as f64 / QUOTA_PER_YUAN;
+    let percent = if total_quota > 0 {
+        (user.quota as f64 / total_quota as f64 * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    DashboardData {
         display_name: user.display_name,
         request_count: user.request_count,
-        today_yuan: summary.quota / QUOTA_PER_YUAN,
-        today_tokens: summary.total_tokens,
-        today_input: summary.input_tokens,
-        today_output: summary.output_tokens,
-        log_count: None,
+        today_yuan: usage.summary.quota / QUOTA_PER_YUAN,
+        today_tokens: usage.summary.total_tokens,
+        today_input: usage.summary.input_tokens,
+        today_output: usage.summary.output_tokens,
+        log_count: usage.log_count,
         remaining,
         used,
         total,
         percent,
-        logs_available,
-    })
+        logs_available: usage.logs_available,
+    }
+}
+
+/// 拉取看板数据；返回 (数据, 当前 user_id) 供调用方缓存。
+/// cached_user_id 有效时并行发账户信息与当日用量请求，省一个 RTT；
+/// 账户 id 与缓存不一致（更换 Cookie）时按新 id 重查用量，保证数据正确。
+pub async fn fetch_dashboard(
+    client: &reqwest::Client,
+    cookie: &str,
+    cached_user_id: Option<i64>,
+) -> Result<(DashboardData, i64), String> {
+    if cookie.is_empty() {
+        return Err("认证失败: 未配置 Cookie".into());
+    }
+
+    let Some(cached_id) = cached_user_id else {
+        // 无缓存：串行取账户信息后查询用量
+        let user = fetch_user_info(client, cookie).await?;
+        let user_id = user.id;
+        let usage = fetch_today_usage(client, cookie, user_id).await;
+        return Ok((assemble_dashboard(user, usage), user_id));
+    };
+
+    // 有缓存：并行发两个请求，账户信息校验 id 一致性
+    let (user_result, usage) = tokio::join!(
+        fetch_user_info(client, cookie),
+        fetch_today_usage(client, cookie, cached_id),
+    );
+    let user = user_result?;
+    let user_id = user.id;
+    let usage = if user_id == cached_id {
+        usage
+    } else {
+        // 账户已切换：按新 id 重查当日用量
+        log::warn!(
+            "user_id 缓存失效（{cached_id} → {}），按新 id 重查用量",
+            user_id
+        );
+        fetch_today_usage(client, cookie, user_id).await
+    };
+    Ok((assemble_dashboard(user, usage), user_id))
 }
 
 /// 拉取区间用量并聚合为统计页数据
@@ -670,5 +736,58 @@ mod tests {
 
         assert!(payload.models.is_empty());
         assert!(payload.daily.is_empty());
+    }
+
+    #[test]
+    fn assemble_dashboard_computes_quota_and_usage() {
+        let user = super::UserInfo {
+            id: 42,
+            quota: 75_000_000,
+            used_quota: 25_000_000,
+            request_count: 1234,
+            display_name: "Tester".into(),
+        };
+        let usage = super::TodayUsage {
+            summary: super::UsageSummary {
+                quota: 2.0 * QUOTA_PER_YUAN,
+                total_tokens: 3000,
+                input_tokens: 1000,
+                output_tokens: 2000,
+            },
+            log_count: Some(57),
+            logs_available: true,
+        };
+
+        let data = super::assemble_dashboard(user, usage);
+
+        assert_eq!(data.display_name, "Tester");
+        assert_eq!(data.request_count, 1234);
+        assert_eq!(data.log_count, Some(57));
+        assert!(data.logs_available);
+        // 75M 剩余 / (75M+25M) 总量 = 75%
+        assert!((data.percent - 75.0).abs() < 1e-9);
+        assert!((data.remaining - 150.0).abs() < 1e-9);
+        assert!((data.used - 50.0).abs() < 1e-9);
+        assert!((data.total - 200.0).abs() < 1e-9);
+        assert!((data.today_yuan - 2.0).abs() < 1e-9);
+        assert_eq!(data.today_tokens, 3000);
+        assert_eq!(data.today_input, 1000);
+        assert_eq!(data.today_output, 2000);
+    }
+
+    #[test]
+    fn assemble_dashboard_handles_zero_quota() {
+        let user = super::UserInfo {
+            id: 1,
+            quota: 0,
+            used_quota: 0,
+            request_count: 0,
+            display_name: "Empty".into(),
+        };
+        let data = super::assemble_dashboard(user, super::TodayUsage::default());
+        assert_eq!(data.percent, 0.0);
+        assert!((data.remaining - 0.0).abs() < 1e-9);
+        assert!(!data.logs_available);
+        assert_eq!(data.log_count, None);
     }
 }

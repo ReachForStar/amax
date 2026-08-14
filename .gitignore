@@ -7,3 +7,5 @@ harmony/.hvigor/
 harmony/**/oh_modules/
 harmony/.idea/
 harmony/**/*.har
+# Tauri updater 签名密钥(私钥,勿提交)
+.tauri/

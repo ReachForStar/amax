@@ -21,6 +21,7 @@ impl Db {
             CREATE TABLE IF NOT EXISTS dashboard_snapshot (
                 id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 saved_at      TEXT NOT NULL,
+                day           TEXT,
                 today_yuan    REAL NOT NULL,
                 total_tokens  INTEGER NOT NULL,
                 remaining     REAL NOT NULL,
@@ -35,20 +36,36 @@ impl Db {
         Ok(Self { conn })
     }
 
-    /// 旧库迁移：补齐 request_count 列；幂等，新旧表均可安全执行
+    /// 旧库迁移：补齐 request_count / day 列并回填；幂等，新旧表均可安全执行。
+    /// 说明：day 为写入时的本地日期（YYYY-MM-DD），由 save_snapshot 计算。
+    /// 不用 date(saved_at,'localtime') 表达式索引——SQLite 视 localtime 修饰符为非确定性函数，
+    /// 禁止出现在索引中；存储列 + 普通索引才能让统计查询按日走索引范围扫描。
     pub fn migrate_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
-        let has_column = {
-            let mut statement = conn.prepare("PRAGMA table_info(dashboard_snapshot)")?;
-            let mut names = statement.query_map([], |row| row.get::<_, String>(1))?;
-            names.any(|name| name.as_deref() == Ok("request_count"))
-        };
-        if !has_column {
+        if !Self::has_column(conn, "dashboard_snapshot", "request_count")? {
             conn.execute(
                 "ALTER TABLE dashboard_snapshot ADD COLUMN request_count INTEGER",
                 [],
             )?;
         }
+        if !Self::has_column(conn, "dashboard_snapshot", "day")? {
+            conn.execute("ALTER TABLE dashboard_snapshot ADD COLUMN day TEXT", [])?;
+        }
+        // 一次性回填历史行（按旧口径的本地日期换算）；已回填后为无操作
+        conn.execute(
+            "UPDATE dashboard_snapshot SET day = date(saved_at, 'localtime') WHERE day IS NULL",
+            [],
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_snapshot_day ON dashboard_snapshot(day)",
+            [],
+        )?;
         Ok(())
+    }
+
+    fn has_column(conn: &Connection, table: &str, column: &str) -> Result<bool, rusqlite::Error> {
+        let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut names = statement.query_map([], |row| row.get::<_, String>(1))?;
+        Ok(names.any(|name| name.as_deref() == Ok(column)))
     }
 
     fn get_raw(&self, key: &str) -> Result<Option<String>, rusqlite::Error> {
@@ -129,15 +146,17 @@ impl Db {
         total: f64,
         request_count: i64,
     ) -> Result<(), rusqlite::Error> {
-        // saved_at 以本地时区 RFC3339 写入，查询侧统一用 date(saved_at, 'localtime') 取本地日期
-        // （SQLite 对带偏移时间串先归一 UTC，无 'localtime' 修饰会截取成 UTC 日期）
+        // saved_at 以本地时区 RFC3339 写入，查询侧统一按存储的 day 列（写入时的本地日期）取每日末条
+        // （旧口径用 date(saved_at, 'localtime') 在查询时换算，依赖查询时刻的时区；day 列固定写入时刻归属）
         // 快照永久保留，供统计页按日聚合，不再做定期清理
+        let now = Local::now();
         self.conn.execute(
             "INSERT INTO dashboard_snapshot
-                 (saved_at, today_yuan, total_tokens, remaining, used, total, request_count)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (saved_at, day, today_yuan, total_tokens, remaining, used, total, request_count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                Local::now().to_rfc3339(),
+                now.to_rfc3339(),
+                now.format("%Y-%m-%d").to_string(),
                 today_yuan,
                 total_tokens,
                 remaining,
@@ -156,10 +175,11 @@ impl Db {
         end_date: &str,
     ) -> Result<Vec<DailySnapshot>, rusqlite::Error> {
         let mut statement = self.conn.prepare(
-            "SELECT date(saved_at, 'localtime') AS day, today_yuan, total_tokens, remaining, request_count
+            "SELECT day, today_yuan, total_tokens, remaining, request_count
              FROM dashboard_snapshot
-             WHERE id IN (SELECT MAX(id) FROM dashboard_snapshot GROUP BY date(saved_at, 'localtime'))
-               AND day BETWEEN ?1 AND ?2
+             WHERE id IN (SELECT MAX(id) FROM dashboard_snapshot
+                          WHERE day BETWEEN ?1 AND ?2
+                          GROUP BY day)
              ORDER BY day",
         )?;
         let rows = statement.query_map(params![start_date, end_date], |row| {
@@ -291,9 +311,16 @@ mod tests {
             db.conn
                 .execute(
                     "INSERT INTO dashboard_snapshot
-                         (saved_at, today_yuan, total_tokens, remaining, used, total, request_count)
-                     VALUES (?1, ?2, ?3, ?4, 0, 100, ?5)",
-                    rusqlite::params![saved_at, yuan, tokens, remaining, req],
+                         (saved_at, day, today_yuan, total_tokens, remaining, used, total, request_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, 0, 100, ?6)",
+                    rusqlite::params![
+                        saved_at,
+                        &saved_at[..10], // 本地日期即 saved_at 的日期部分
+                        yuan,
+                        tokens,
+                        remaining,
+                        req
+                    ],
                 )
                 .expect("插入快照应成功");
         }
@@ -326,13 +353,13 @@ mod tests {
 
     #[test]
     fn daily_snapshots_attribute_early_morning_to_local_date() {
-        // 防回归：SQLite date() 对带偏移时间串先归一 UTC，无 'localtime' 会把凌晨快照计入前一天
+        // 防回归：凌晨快照按写入时的本地日期（day 列）归属当日，不因 UTC 归一偏移到前一天
         let db = Db::open(std::path::Path::new(":memory:")).expect("内存数据库应打开成功");
         db.conn
             .execute(
                 "INSERT INTO dashboard_snapshot
-                     (saved_at, today_yuan, total_tokens, remaining, used, total, request_count)
-                 VALUES (?1, 1.0, 10, 99.0, 0, 100, 1)",
+                     (saved_at, day, today_yuan, total_tokens, remaining, used, total, request_count)
+                 VALUES (?1, '2026-08-03', 1.0, 10, 99.0, 0, 100, 1)",
                 rusqlite::params![local_rfc3339("2026-08-03T06:00:00")],
             )
             .expect("插入快照应成功");
@@ -351,6 +378,51 @@ mod tests {
             .get_daily_snapshots("2026-08-01", "2026-08-02")
             .expect("查询应成功");
         assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn daily_snapshots_range_filtered_inside_subquery_and_indexed() {
+        // 防回归：区间过滤须下推到子查询内（依赖 day 列索引），
+        // 区间外的日期不得参与分组，也不得出现在结果中
+        let db = Db::open(std::path::Path::new(":memory:")).expect("内存数据库应打开成功");
+        let insert = |saved_at: &str, req: i64| {
+            db.conn
+                .execute(
+                    "INSERT INTO dashboard_snapshot
+                         (saved_at, day, today_yuan, total_tokens, remaining, used, total, request_count)
+                     VALUES (?1, ?2, 1.0, 10, 99.0, 0, 100, ?3)",
+                    rusqlite::params![local_rfc3339(saved_at), &saved_at[..10], req],
+                )
+                .expect("插入快照应成功");
+        };
+        // 区间外（前后各一天）+ 区间内两天各两条，验证日末条取 MAX(id)
+        insert("2026-07-31T10:00:00", 1);
+        insert("2026-08-01T08:00:00", 10);
+        insert("2026-08-01T20:00:00", 25);
+        insert("2026-08-02T09:00:00", 30);
+        insert("2026-08-02T21:00:00", 55);
+        insert("2026-08-03T10:00:00", 99);
+
+        let rows = db
+            .get_daily_snapshots("2026-08-01", "2026-08-02")
+            .expect("查询应成功");
+        assert_eq!(rows.len(), 2, "区间外日期不应出现在结果中");
+        assert_eq!(rows[0].date, "2026-08-01");
+        assert_eq!(rows[0].request_count, Some(25), "应取当日末条");
+        assert_eq!(rows[1].date, "2026-08-02");
+        assert_eq!(rows[1].request_count, Some(55), "应取当日末条");
+
+        // day 列索引应已建好，查询可走索引范围扫描
+        let mut statement = db
+            .conn
+            .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_snapshot_day'")
+            .expect("准备应成功");
+        let exists = statement
+            .query_map([], |row| row.get::<_, i64>(0))
+            .expect("查询应成功")
+            .next()
+            .is_some();
+        assert!(exists, "day 列索引应存在");
     }
 
     #[test]
@@ -374,8 +446,10 @@ mod tests {
     #[test]
     fn migrate_schema_is_idempotent_and_upgrades_legacy() {
         let conn = rusqlite::Connection::open_in_memory().expect("内存数据库应打开成功");
-        // 构造旧 schema（无 request_count 列）
-        conn.execute_batch(
+        // 构造旧 schema（无 request_count / day 列），并插入一条历史行
+        // （用机器当前偏移构造 saved_at，保证任意时区测试机回填的本地日期一致）
+        let legacy_saved_at = local_rfc3339("2026-08-01T08:00:00");
+        conn.execute_batch(&format!(
             "CREATE TABLE dashboard_snapshot (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 saved_at TEXT NOT NULL,
@@ -384,8 +458,11 @@ mod tests {
                 remaining REAL NOT NULL,
                 used REAL NOT NULL,
                 total REAL NOT NULL
-            );",
-        )
+            );
+            INSERT INTO dashboard_snapshot
+                (saved_at, today_yuan, total_tokens, remaining, used, total)
+            VALUES ('{legacy_saved_at}', 1.0, 10, 99.0, 0, 100);"
+        ))
         .expect("建旧表应成功");
 
         super::Db::migrate_schema(&conn).expect("首次迁移应成功");
@@ -400,5 +477,24 @@ mod tests {
             .collect::<Result<_, _>>()
             .expect("收集应成功");
         assert!(names.iter().any(|name| name == "request_count"));
+        assert!(names.iter().any(|name| name == "day"));
+
+        // 历史行应按本地日期回填 day 列
+        let day: String = conn
+            .query_row("SELECT day FROM dashboard_snapshot LIMIT 1", [], |row| {
+                row.get(0)
+            })
+            .expect("回填后的 day 应可读");
+        assert_eq!(day, "2026-08-01");
+
+        // day 索引应已建好
+        let index_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_snapshot_day'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("索引查询应成功");
+        assert_eq!(index_exists, 1);
     }
 }
