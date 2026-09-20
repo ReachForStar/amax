@@ -4,6 +4,15 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，小节标题必须为 `## [版本号]` 形式。
 
+## [Unreleased]
+
+### 新增
+
+- **桌面端官网 WebView 登录获取 Cookie**（获取方式对齐手机端）：配置页新增“使用官网登录获取”主按钮，点击后在应用内打开官网登录窗口，登录成功自动提取整串 Session Cookie（含 HTTP-only）并复用现有保存验证链路进入看板；关闭登录窗口视为取消，约 10 分钟未完成登录则超时提示
+  - 新增后端 command `open_login_window` 与模块 `src-tauri/src/login.rs`（基于 Tauri `WebviewWindow::cookies_for_url`，无新增依赖）
+  - 新增事件：`login://success`（携带 Cookie）、`login://cancelled`、`login://timeout`
+  - 手动粘贴保留为兜底路径，配置页文案相应降级
+
 ## [0.2.1] - 2026-08-02
 
 ### 新增

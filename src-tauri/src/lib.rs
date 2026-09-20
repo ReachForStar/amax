@@ -3,6 +3,7 @@
 mod api;
 mod crypto;
 mod db;
+mod login;
 
 use chrono::{Local, NaiveDate};
 use db::Db;
@@ -382,6 +383,7 @@ pub fn run() {
             fetch_dashboard,
             get_local_stats,
             fetch_usage_stats,
+            login::open_login_window,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

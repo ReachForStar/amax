@@ -47,6 +47,7 @@ function createHarness({
   pendingSaveConfig = false,
   saveError,
   dashboardError,
+  loginError,
 } = {}) {
   const ids = [
     'config-screen', 'dashboard-screen', 'config-status', 'skeleton', 'error-msg',
@@ -54,6 +55,13 @@ function createHarness({
     'config-form', 'refresh-btn', 'settings-btn', 'last-updated', 'user-name',
     'user-requests', 'today-yuan', 'log-count', 'today-tokens', 'token-detail',
     'quota-percent', 'progress-fill', 'quota-remaining', 'quota-total', 'quota-used',
+    'login-btn',
+    // 统计页与导出元素：harness 需覆盖 app.js 顶层引用的全部 #id，否则 vm 加载即抛错
+    'stats-screen', 'stats-btn', 'stats-back-btn', 'range-start', 'range-end',
+    'range-error', 'summary-title', 'trend-note', 'trend-error', 'trend-chart',
+    'requests-chart', 'model-chart', 'model-error', 'model-basis-note', 'model-list',
+    'remaining-block', 'remaining-chart', 'export-csv-btn', 'export-json-btn',
+    'export-xlsx-btn',
   ];
   let focusedElement = null;
   const elements = Object.fromEntries(ids.map((id) => [id, new Element()]));
@@ -76,6 +84,7 @@ function createHarness({
       return null;
     },
     addEventListener(type, handler) { documentListeners.set(type, handler); },
+    querySelectorAll() { return []; },
   };
   const invokeCalls = [];
   let resolveSaveConfig;
@@ -104,11 +113,20 @@ function createHarness({
         remaining: 75, total: 100, used: 25,
       };
     }
+    if (command === 'open_login_window') {
+      if (loginError) throw loginError;
+      return undefined;
+    }
     return undefined;
+  };
+  const eventHandlers = new Map();
+  const listen = async (name, handler) => {
+    eventHandlers.set(name, handler);
+    return () => eventHandlers.delete(name);
   };
   const confirmCalls = [];
   const window = {
-    __TAURI__: { core: { invoke } },
+    __TAURI__: { core: { invoke, event: { listen } } },
     confirm(message) { confirmCalls.push(message); return confirm; },
     setInterval() { return 1; },
   };
@@ -122,6 +140,7 @@ function createHarness({
     documentListeners,
     focused: () => focusedElement,
     resolveSaveConfig: () => resolveSaveConfig?.(),
+    emitEvent: (name, payload) => eventHandlers.get(name)?.({ payload }),
     flush: () => new Promise((resolve) => setImmediate(resolve)),
   };
 }
@@ -295,4 +314,114 @@ test('保存并加载看板成功后应清空配置输入', async () => {
   assert.equal(app.elements['config-form'].getAttribute('aria-busy'), 'false');
   assert.equal(app.elements['save-btn'].disabled, false);
   assert.equal(app.elements['back-btn'].disabled, false);
+});
+
+// ═══ 官网 WebView 登录 ═══
+
+test('配置页应提供官网登录按钮且手动粘贴降级为兜底', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'dist', 'index.html'), 'utf8');
+
+  assert.match(html, /<button id="login-btn" type="button"[^>]*>使用官网登录获取<\/button>/);
+  const loginIdx = html.indexOf('id="login-btn"');
+  const cookieIdx = html.indexOf('id="cookie-input"');
+  assert.ok(loginIdx > -1 && cookieIdx > -1 && loginIdx < cookieIdx, '登录按钮应在 Cookie 输入之前');
+  assert.match(html, /<span>或手动粘贴<\/span>/);
+});
+
+test('点击登录按钮应调用 open_login_window 并进入等待态', async () => {
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  await app.flush();
+
+  await app.elements['login-btn'].dispatch('click');
+  await app.flush();
+
+  assert.ok(app.invokeCalls.includes('open_login_window'));
+  assert.equal(app.elements['login-btn'].disabled, true);
+  assert.equal(app.elements['login-btn'].textContent, '等待登录…');
+  assert.match(app.elements['config-status'].textContent, /请在窗口中完成登录/);
+});
+
+test('打开登录窗口失败应恢复按钮并提示', async () => {
+  const app = createHarness({
+    config: { has_cookie: false, has_api_key: false, expired: false },
+    loginError: '创建登录窗口失败',
+  });
+  await app.flush();
+
+  await app.elements['login-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.elements['login-btn'].disabled, false);
+  assert.equal(app.elements['login-btn'].textContent, '使用官网登录获取');
+  assert.match(app.elements['config-status'].textContent, /无法打开登录窗口：创建登录窗口失败/);
+});
+
+test('登录成功应保存 Cookie 并进入看板', async () => {
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  await app.flush();
+
+  await app.elements['login-btn'].dispatch('click');
+  await app.flush();
+  app.emitEvent('login://success', { cookie: 'session=webview-cookie' });
+  await app.flush();
+
+  assert.ok(app.invokeCalls.includes('save_config'));
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+  assert.equal(app.elements['config-form'].getAttribute('aria-busy'), 'false');
+  assert.equal(app.elements['login-btn'].disabled, false);
+});
+
+test('登录成功后认证失败应回到配置页并提示', async () => {
+  const app = createHarness({
+    config: { has_cookie: false, has_api_key: false, expired: false },
+    dashboardError: '401 认证失败',
+  });
+  await app.flush();
+
+  await app.elements['login-btn'].dispatch('click');
+  await app.flush();
+  app.emitEvent('login://success', { cookie: 'session=stale' });
+  await app.flush();
+
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
+  assert.match(app.elements['config-status'].textContent, /Cookie 无效或已过期/);
+  assert.equal(app.elements['login-btn'].disabled, false);
+});
+
+test('登录取消应恢复按钮并给出提示', async () => {
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  await app.flush();
+
+  await app.elements['login-btn'].dispatch('click');
+  await app.flush();
+  app.emitEvent('login://cancelled');
+  await app.flush();
+
+  assert.equal(app.elements['login-btn'].disabled, false);
+  assert.equal(app.elements['login-btn'].textContent, '使用官网登录获取');
+  assert.match(app.elements['config-status'].textContent, /已取消登录/);
+});
+
+test('登录超时应恢复按钮并提示', async () => {
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  await app.flush();
+
+  await app.elements['login-btn'].dispatch('click');
+  await app.flush();
+  app.emitEvent('login://timeout');
+  await app.flush();
+
+  assert.equal(app.elements['login-btn'].disabled, false);
+  assert.match(app.elements['config-status'].textContent, /登录超时/);
+});
+
+test('非等待态收到登录事件不应改变按钮', async () => {
+  const app = createHarness();
+  await app.flush();
+
+  app.emitEvent('login://cancelled');
+  await app.flush();
+
+  assert.equal(app.elements['login-btn'].disabled, false);
+  assert.ok(!app.invokeCalls.includes('save_config'));
 });

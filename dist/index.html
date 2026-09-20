@@ -20,10 +20,18 @@
 
       <form id="config-form" class="config-form" novalidate aria-busy="false">
         <div class="form-group">
-          <label for="cookie-input">Session Cookie</label>
+          <button id="login-btn" type="button" class="btn primary">使用官网登录获取</button>
+          <p class="hint">在打开的窗口中登录 AMAX 官网，登录成功后自动获取并验证</p>
+        </div>
+
+        <div class="form-group">
+          <div class="label-row">
+            <label for="cookie-input">Session Cookie</label>
+            <span>或手动粘贴</span>
+          </div>
           <input type="password" id="cookie-input" placeholder="session=MTc4MzQyOTkyN3xE..." autocomplete="off" />
           <ol class="access-steps">
-            <li>登录 <a href="https://ai.amaxsmp.com/dashboard" target="_blank" rel="noreferrer" tabindex="-1">AMAX Dashboard</a></li>
+            <li>浏览器登录 <a href="https://ai.amaxsmp.com/dashboard" target="_blank" rel="noreferrer" tabindex="-1">AMAX Dashboard</a></li>
             <li>按 F12，打开 Application → Cookies</li>
             <li>找到 session，复制完整 Value</li>
           </ol>

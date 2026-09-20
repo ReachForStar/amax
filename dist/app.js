@@ -26,6 +26,7 @@ const errorEl = $('#error-msg');
 const dashboardData = $('#dashboard-data');
 const cookieInput = $('#cookie-input');
 const apikeyInput = $('#apikey-input');
+const loginBtn = $('#login-btn');
 const saveBtn = $('#save-btn');
 const configForm = $('#config-form');
 const backBtn = $('#back-btn');
@@ -55,6 +56,7 @@ let dashboardRequest = null;
 let canReturnToDashboard = false;
 let configBaseline = { cookie: '', apiKey: '' };
 let isSavingConfig = false;
+let loginPending = false;
 
 // ═══ 工具 ═══
 function formatTokens(n) {
@@ -80,8 +82,15 @@ function showScreen(screen) {
 function setConfigBusy(isBusy) {
   isSavingConfig = isBusy;
   saveBtn.disabled = isBusy;
+  loginBtn.disabled = isBusy || loginPending;
   backBtn.disabled = isBusy;
   configForm.setAttribute('aria-busy', String(isBusy));
+}
+
+function setLoginPending(pending) {
+  loginPending = pending;
+  loginBtn.disabled = pending || isSavingConfig;
+  loginBtn.textContent = pending ? '等待登录…' : '使用官网登录获取';
 }
 
 function resetConfigForm() {
@@ -273,6 +282,20 @@ function renderDashboard(d) {
 $('#refresh-btn').addEventListener('click', () => loadDashboard());
 backBtn.addEventListener('click', leaveSettings);
 
+loginBtn.addEventListener('click', async () => {
+  configStatus.classList.add('hidden');
+  setLoginPending(true);
+  configStatus.className = 'status loading';
+  configStatus.textContent = '已打开官网登录窗口，请在窗口中完成登录…';
+  configStatus.classList.remove('hidden');
+  try {
+    await invoke('open_login_window');
+  } catch (e) {
+    setLoginPending(false);
+    showConfigError('无法打开登录窗口：' + getErrorMessage(e));
+  }
+});
+
 async function openSettings() {
   try {
     const cfg = await invoke('get_config');
@@ -307,6 +330,40 @@ async function setupEventListener() {
   try {
     window._unlistenDashboard = await listen('dashboard-updated', (event) => {
       if (event.payload && hasDashboardData) renderDashboard(event.payload);
+    });
+
+    // 官网 WebView 登录：Rust 侧提取 Cookie 成功后，走现有保存验证链路
+    window._unlistenLoginSuccess = await listen('login://success', async (event) => {
+      if (!loginPending) return;
+      const cookie = event.payload && event.payload.cookie;
+      if (!cookie) { setLoginPending(false); showConfigError('登录成功但未取到 Cookie，请重试或改用手动粘贴'); return; }
+      configStatus.className = 'status loading';
+      configStatus.textContent = '已获取 Cookie，正在验证并获取数据...';
+      setConfigBusy(true);
+      try {
+        await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
+        hasSavedCookie = true;
+        setLoginPending(false);
+        if (await loadDashboard()) { setConfigBusy(false); resetConfigForm(); }
+      } catch (e) {
+        setConfigBusy(false);
+        setLoginPending(false);
+        showConfigError('连接失败：' + getErrorMessage(e));
+      }
+    });
+
+    window._unlistenLoginCancelled = await listen('login://cancelled', () => {
+      if (!loginPending) return;
+      setLoginPending(false);
+      configStatus.className = 'status';
+      configStatus.textContent = '已取消登录。可重新点击上方按钮，或改为手动粘贴。';
+      configStatus.classList.remove('hidden');
+    });
+
+    window._unlistenLoginTimeout = await listen('login://timeout', () => {
+      if (!loginPending) return;
+      setLoginPending(false);
+      showConfigError('登录超时，请重新发起或改为手动粘贴。');
     });
   } catch (e) {
     console.error('监听后台刷新事件失败:', e);

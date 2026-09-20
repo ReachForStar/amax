@@ -40,15 +40,16 @@ cargo tauri build
 
 ### 前后端边界
 
-`dist/index.html`、`dist/style.css`、`dist/app.js` 构成完整前端。`src-tauri/tauri.conf.json` 的 `frontendDist` 指向 `../dist`，静态文件无需打包即可被 Tauri 加载。前端通过 `window.__TAURI__` 调用五个 IPC command：
+`dist/index.html`、`dist/style.css`、`dist/app.js` 构成完整前端。`src-tauri/tauri.conf.json` 的 `frontendDist` 指向 `../dist`，静态文件无需打包即可被 Tauri 加载。前端通过 `window.__TAURI__` 调用六个 IPC command：
 
 - `get_config`：读取认证配置和 Cookie 过期状态。
 - `save_config`：保存 Cookie 和可选 API Key。
 - `fetch_dashboard`：刷新数据、保存快照并更新托盘。
 - `get_local_stats`：按起止日期查询每日快照（日末条），返回余额、本地估算值与每日新增请求数（累计差分）。
 - `fetch_usage_stats`：按起止日期调用官网聚合，返回补零后的每日消耗、模型分布与区间汇总。
+- `open_login_window`：打开官网 WebView 登录窗口，登录成功后自动提取 Cookie（见 `login.rs`）。
 
-后端通过 `dashboard-updated` 事件推送后台刷新结果。新增或重命名 command/event 时，需要同步修改 `src-tauri/src/lib.rs` 和 `dist/app.js`。
+后端通过 `dashboard-updated` 事件推送后台刷新结果，通过 `login://success` / `login://cancelled` / `login://timeout` 推送官网登录窗结果。新增或重命名 command/event 时，需要同步修改 `src-tauri/src/lib.rs` 和 `dist/app.js`。
 
 ### Rust 后端
 
@@ -72,6 +73,8 @@ cargo tauri build
 
 `src-tauri/src/crypto.rs` 使用 Windows DPAPI 将 Cookie/API Key 绑定当前用户和机器，加密结果以 `dpapi:v1:<hex>` 存入 SQLite。`Db::get_cookie` / `get_api_key` 仍兼容旧明文记录；调整持久化格式时必须保留迁移路径。非 Windows 构建不提供不安全的明文加密降级。
 
+`src-tauri/src/login.rs` 实现官网 WebView 登录获取 Cookie（对齐手机端 LoginPage）：`open_login_window`（async command，与 Tauri 内置 `create_webview_window` 同形态）创建 `login` 标签的官网登录窗，已存在则仅聚焦（幂等），初始隐藏、页面加载完成后显示。登录判定为单通道：spawned 轮询任务每 800ms 调 `cookies_for_url`（可读 HTTP-only Cookie），session 出现即成功，口径同手机端 `parseSessionCookie`。手机端另有「URL 跳转 /dashboard」快路径，桌面端**不实现**——Tauri 文档明确 `cookies_for_url` 在 Windows 上于同步 command 或事件处理器中调用会死锁（wry#583），只能在 async command/独立线程读取。共享 `settled` 原子标志防重入并终止轮询；成功广播 `login://success`（载荷为完整 Cookie 请求头串，前端复用 `save_config` + `fetch_dashboard` 验证链路后进入看板），用户关窗广播 `login://cancelled`，约 10 分钟未完成广播 `login://timeout`。登录窗不在 `capabilities/default.json` 的 `windows: ["main"]` 内，官网页面因此不具备任何 IPC 权限。
+
 ### 配置与权限
 
 - `src-tauri/tauri.conf.json`：静态前端入口、520×680 主窗口、CSP、Windows MSI/WiX 和图标。
@@ -84,6 +87,8 @@ cargo tauri build
 启动后，前端调用 `get_config`：有效 Cookie 进入看板并调用 `fetch_dashboard`，否则显示配置页。`loadDashboard` 合并并发刷新请求；成功后 `renderDashboard` 更新数据与更新时间，认证错误返回配置页，其他错误保留已有数据并显示重试信息。后台定时刷新走相同 Rust 聚合路径，通过事件更新前端。前端 JS 同时兼容 `window.__TAURI__.core.invoke`、`window.__TAURI_INTERNALS__.invoke` 和旧版 `window.__TAURI__.invoke`；调整 IPC 封装时不要删掉兼容分支。
 
 真实认证数据只存放在用户应用数据目录的 SQLite 中。运行数据请求依赖有效 Session Cookie；API Key 当前仅作为兼容配置保留，不参与官网账户级聚合。没有凭据时仍可验证配置页、窗口和托盘生命周期。
+
+配置页获取 Cookie 有两条路径，与手机端一致：主路径点击“使用官网登录获取”经 `open_login_window` 在应用内登录官网，`login.rs` 提取整串 Cookie 后广播 `login://success`，前端复用 `save_config` + `fetch_dashboard` 验证链路；兜底路径仍支持从浏览器 F12 手动粘贴 session 值。两端凭据均绑定本机加密保存，不做跨设备同步。
 
 统计页经看板顶栏图表按钮进入：区间选择器（预设 7/14/30 天 + 自定义起止日期，跨度上限 1096 天）驱动 `fetch_usage_stats`（官方主源）与 `get_local_stats`（余额、请求数、对比与降级数据）并行调用；官方失败时趋势与汇总回退本地估算并标注，模型分布仅官方可用；消耗趋势图可叠加本地对比数据集（默认隐藏）；导出按钮将当前区间数据输出为 CSV / JSON / XLSX（Chart.js 与 SheetJS 以 UMD 单文件存放于 `dist/vendor/`）。
 
