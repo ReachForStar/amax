@@ -60,10 +60,13 @@ cargo tauri build
 
 `src-tauri/src/lib.rs` 是应用编排中心：
 
-- 注册 plugin、共享 `AppState` 和 IPC command。
+- 注册 plugin（notification + single-instance + log + updater）、共享 `AppState` 和 IPC command。
 - 用异步互斥锁串行化前台、托盘和定时刷新，避免重复网络请求。
 - 动态创建唯一 ID 为 `main` 的托盘图标；关闭或最小化窗口时隐藏并移出任务栏，托盘单击恢复窗口。
-- 每 10 分钟后台刷新；剩余额度低于 10% 时发送一次系统通知。
+- 每 10 分钟后台刷新，失败后 60s 起快速重试（封顶 5 分钟，成功复位）；剩余额度低于 10% 时发送一次系统通知。
+- 单实例：二次启动唤醒已有实例窗口，不重复创建托盘与定时器。
+- 日志统一走 tauri-plugin-log（stdout + 应用日志目录 amax.log，5MB 轮转），不用 eprintln!。
+- 自动更新：启动 15 秒后 + 托盘「检查更新」菜单触发，从 GitHub Releases 拉 latest.json，发现新版本下载安装并调用 `app.restart()` 重启（debug 构建跳过）；发布产物须带 .sig 与 latest.json。
 - 保存刷新快照并同步托盘 tooltip。
 
 `src-tauri/src/api.rs` 负责 HTTP 聚合：
@@ -74,7 +77,7 @@ cargo tauri build
 - Token 使用 `summary.total_tokens/input_tokens/output_tokens`；费用使用 `summary.quota / QUOTA_PER_YUAN`，其中 `QUOTA_PER_YUAN = 500_000`。
 - 日志汇总失败时仍返回账户额度，不能把额度和日志查询改成全有或全无。
 
-`src-tauri/src/db.rs` 管理应用数据目录中的 SQLite：`config` 保存认证信息（含明文字符串键 `cookie_expires_at`，非机密，随 Cookie 同事务 set-or-delete——新 Cookie 不带到期信息时必须清掉上一次的日期），`dashboard_snapshot` 保存刷新快照（含 `request_count` 累计值，`Db::open` 对旧库幂等 `ALTER TABLE ADD COLUMN` 迁移），快照永久保留、不清理。Cookie 保存后**不设本地过期时间**，实际失效由服务端判定；`cookie_expires_at` 只用于展示，任何代码不得拿它做过期比较或拦截（`save_config_clears_stale_expires_when_new_cookie_has_none` 锁定该不变量）。
+`src-tauri/src/db.rs` 管理应用数据目录中的 SQLite：`config` 保存认证信息（含明文字符串键 `cookie_expires_at`，非机密，随 Cookie 同事务 set-or-delete——新 Cookie 不带到期信息时必须清掉上一次的日期），`dashboard_snapshot` 保存刷新快照（含 `request_count` 累计值与 `day` 本地日期列，`Db::open` 对旧库幂等迁移：`ALTER TABLE ADD COLUMN` + 历史行回填 + `idx_snapshot_day` 索引），快照永久保留、不清理。注意 SQLite 的 `date(...,'localtime')` 是非确定性函数，不能建表达式索引，按日查询依赖存储的 `day` 列（写入时计算，不随查询时刻时区漂移）。Cookie 保存后**不设本地过期时间**，实际失效由服务端判定（API 返回认证错误时前端回退配置页）；`cookie_expires_at` 只用于展示，任何代码不得拿它做过期比较或拦截（`save_config_clears_stale_expires_when_new_cookie_has_none` 锁定该不变量）。
 
 `src-tauri/src/crypto.rs` 使用 Windows DPAPI 将 Cookie/API Key 绑定当前用户和机器，加密结果以 `dpapi:v1:<hex>` 存入 SQLite。`Db::get_cookie` / `get_api_key` 仍兼容旧明文记录；调整持久化格式时必须保留迁移路径。非 Windows 构建不提供不安全的明文加密降级。
 
@@ -106,7 +109,7 @@ cargo tauri build
 | 定时刷新 | 每 10 分钟本地定时器 | WorkScheduler 延迟任务（最小间隔 2 小时起、非精确周期、回调上限 2 分钟） | 系统对后台任务的调度管控，无法复刻桌面节奏 |
 | 失效引导载体 | `auth://expired` 事件 + `focusRelogin()` | `AppStorage` 键 `authNotice`（看门狗/看板/统计页三处生产者，`ConfigPage.onPageShow` 消费后清空） | ArkUI 无跨页事件总线，`AppStorage` 是等价的单通道 |
 
-统计页经看板顶栏图表按钮进入：区间选择器（预设 7/14/30 天 + 自定义起止日期，跨度上限 1096 天）驱动 `fetch_usage_stats`（官方主源）与 `get_local_stats`（余额、请求数、对比与降级数据）并行调用；官方失败时趋势与汇总回退本地估算并标注，模型分布仅官方可用；消耗趋势图可叠加本地对比数据集（默认隐藏）；导出按钮将当前区间数据输出为 CSV / JSON / XLSX（Chart.js 与 SheetJS 以 UMD 单文件存放于 `dist/vendor/`）。
+统计页经看板顶栏图表按钮进入：区间选择器（预设 7/14/30 天 + 自定义起止日期，跨度上限 1096 天）驱动 `fetch_usage_stats`（官方主源）与 `get_local_stats`（余额、请求数、对比与降级数据）并行调用；官方失败时趋势与汇总回退本地估算并标注，模型分布仅官方可用；消耗趋势图可叠加本地对比数据集（默认隐藏）；导出按钮将当前区间数据输出为 CSV / JSON / XLSX。Chart.js 与 SheetJS 以 UMD 单文件存放于 `dist/vendor/`，由 `app.js` 在进入统计页 / 首次 XLSX 导出时按需注入（`ensureChartLib` / `ensureXlsxLib`），不要改回 index.html 同步加载。统计页 `loadStats` 用 `statsLoadSeq` 序号丢弃过期响应（快速切换区间时防止旧数据覆盖新区间），改加载逻辑时不要删掉该保护。
 
 ## HarmonyOS 版
 

@@ -14,12 +14,17 @@ use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_updater::UpdaterExt;
 
 pub struct AppState {
     db: Mutex<Db>,
     client: reqwest::Client,
     refresh_lock: tokio::sync::Mutex<()>,
     low_quota_notified: Mutex<bool>,
+    /// 最近一次成功刷新时刻，用于启动任务去重（窗口可见时前端已触发刷新）
+    last_successful_refresh: Mutex<Option<std::time::Instant>>,
+    /// 最近一次刷新得到的 user_id，供看板请求并行（缓存失效时自动回退重查）
+    user_id_cache: Mutex<Option<i64>>,
 }
 
 /// 校验统计区间：格式、先后、不超今天、跨度上限 1096 天
@@ -140,7 +145,12 @@ fn save_config(
         return Err(AppError::input("请至少填写一项认证信息"));
     }
     let mut db = state.db.lock().map_err(|_| poisoned("数据库"))?;
-    db.save_config(&cookie, &api_key, expires_at.as_deref())
+    db.save_config(&cookie, &api_key, expires_at.as_deref())?;
+    // Cookie 变更后 user_id 可能不同，清缓存避免用旧 id 并发查询
+    if let Ok(mut cache) = state.user_id_cache.lock() {
+        *cache = None;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -152,7 +162,7 @@ fn hide_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main")
         && let Err(error) = window.set_skip_taskbar(true).and_then(|_| window.hide())
     {
-        eprintln!("隐藏主窗口失败: {error}");
+        log::error!("隐藏主窗口失败: {error}");
     }
 }
 
@@ -164,7 +174,7 @@ fn show_main_window(app: &tauri::AppHandle) {
             .and_then(|_| window.unminimize())
             .and_then(|_| window.set_focus())
     {
-        eprintln!("显示主窗口失败: {error}");
+        log::error!("显示主窗口失败: {error}");
     }
 }
 
@@ -175,7 +185,7 @@ fn update_tray_tooltip(app: &tauri::AppHandle, data: &api::DashboardData) {
             data.today_yuan, data.remaining, data.percent
         )))
     {
-        eprintln!("更新托盘提示失败: {error}");
+        log::error!("更新托盘提示失败: {error}");
     }
 }
 
@@ -190,7 +200,12 @@ async fn refresh_dashboard(
         let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
         db.get_cookie().unwrap_or_default()
     };
-    let data = api::fetch_dashboard(&state.client, &cookie).await?;
+    // 缓存 user_id 时并行拉账户信息与当日用量，省一个 RTT；id 变化自动回退重查
+    let cached_user_id = state.user_id_cache.lock().ok().and_then(|cache| *cache);
+    let (data, user_id) = api::fetch_dashboard(&state.client, &cookie, cached_user_id).await?;
+    if let Ok(mut cache) = state.user_id_cache.lock() {
+        *cache = Some(user_id);
+    }
 
     {
         let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
@@ -237,16 +252,23 @@ async fn refresh_dashboard(
             .map_err(|error| AppError::storage(format!("发送额度通知失败: {error}")))?;
     }
 
+    if let Ok(mut last) = state.last_successful_refresh.lock() {
+        *last = Some(std::time::Instant::now());
+    }
+
     Ok(data)
 }
 
 fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let refresh = MenuItemBuilder::with_id("tray_refresh", "🔄 刷新数据").build(app)?;
     let show = MenuItemBuilder::with_id("tray_show", "📊 显示窗口").build(app)?;
+    let check_update = MenuItemBuilder::with_id("tray_update", "⬇️ 检查更新").build(app)?;
     let quit = MenuItemBuilder::with_id("tray_quit", "❌ 退出").build(app)?;
     let menu = MenuBuilder::new(app)
         .item(&refresh)
         .item(&show)
+        .separator()
+        .item(&check_update)
         .separator()
         .item(&quit)
         .build()?;
@@ -264,6 +286,12 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     refresh_and_notify(&app).await;
+                });
+            }
+            "tray_update" => {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    check_for_updates(&app).await;
                 });
             }
             "tray_show" => show_main_window(app),
@@ -287,30 +315,100 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
 /// 后台路径（定时/托盘/启动）的刷新失败处理：认证失效广播给前端引导重登，
 /// 否则用户不主动点刷新就永远看不到 Cookie 已失效，看板会停在陈旧数据
 fn report_refresh_error(app: &tauri::AppHandle, source: &str, error: AppError) {
-    eprintln!("{source}刷新失败: {error:?}");
+    log::error!("{source}刷新失败: {error:?}");
     if error.is_auth()
         && let Err(emit_error) = app.emit("auth://expired", ())
     {
-        eprintln!("推送认证失效事件失败: {emit_error}");
+        log::error!("推送认证失效事件失败: {emit_error}");
     }
 }
 
-async fn refresh_and_notify(app: &tauri::AppHandle) {
-    if let Err(error) = refresh_dashboard(app, true, true).await {
-        report_refresh_error(app, "后台", error);
+/// 检查并安装更新：从 GitHub Releases 拉取 latest.json，发现新版本即下载并安装，
+/// 安装完成后调用 tauri 核心 restart() 重启应用。
+/// 开发模式（debug 构建）与无网环境下静默跳过，失败仅记日志。
+async fn check_for_updates(app: &tauri::AppHandle) {
+    if cfg!(debug_assertions) {
+        return; // dev 运行不检查更新
+    }
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(error) => {
+            log::error!("初始化更新器失败: {error}");
+            return;
+        }
+    };
+    let update = match updater.check().await {
+        Ok(Some(update)) => update,
+        Ok(None) => return, // 已是最新版本
+        Err(error) => {
+            log::warn!("检查更新失败: {error}");
+            return;
+        }
+    };
+    log::info!("发现新版本 v{}，开始下载安装", update.version);
+    let notify_result = app
+        .notification()
+        .builder()
+        .title("⬇️ AMAX Dashboard 有新版本")
+        .body(format!(
+            "v{} 正在后台下载并安装，完成后将自动重启",
+            update.version
+        ))
+        .show();
+    if let Err(error) = notify_result {
+        log::warn!("更新通知发送失败: {error}");
+    }
+    if let Err(error) = update
+        .download_and_install(
+            // 回调签名 (chunk_len: usize, content_length: Option<u64>)
+            |chunk_len, content_length| {
+                log::debug!("更新下载进度: 块 {chunk_len} 字节，总长度 {content_length:?}");
+            },
+            || log::info!("更新下载完成"),
+        )
+        .await
+    {
+        log::error!("更新安装失败: {error}");
+        return;
+    }
+    // 安装完成（MSI/NSIS 已替换文件）后重启进入新版本
+    log::info!("更新安装完成，重启应用");
+    app.restart();
+}
+
+/// 后台刷新：成功与否返回给调用方，供自动刷新排程决定下次间隔
+async fn refresh_and_notify(app: &tauri::AppHandle) -> bool {
+    match refresh_dashboard(app, true, true).await {
+        Ok(_) => true,
+        Err(error) => {
+            report_refresh_error(app, "后台", error);
+            false
+        }
     }
 }
 
 /// 后台自动刷新间隔：10 分钟
 const AUTO_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+/// 刷新失败后的快速重试：60s 起，封顶 5 分钟，成功即复位
+const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
+const RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 fn start_auto_refresh(app: &tauri::AppHandle) {
     let app_handle = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(AUTO_REFRESH_INTERVAL).await;
+        let mut retry_delay = RETRY_BASE_DELAY;
         loop {
-            refresh_and_notify(&app_handle).await;
-            tokio::time::sleep(AUTO_REFRESH_INTERVAL).await;
+            let success = refresh_and_notify(&app_handle).await;
+            let delay = if success {
+                retry_delay = RETRY_BASE_DELAY;
+                AUTO_REFRESH_INTERVAL
+            } else {
+                let current = retry_delay;
+                retry_delay = (retry_delay * 2).min(RETRY_MAX_DELAY);
+                current
+            };
+            tokio::time::sleep(delay).await;
         }
     });
 }
@@ -326,6 +424,23 @@ fn db_path(app: &tauri::AppHandle) -> std::path::PathBuf {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 二次启动：不新建进程，唤醒已有实例主窗口（托盘仍在原实例中）
+            show_main_window(app);
+        }))
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .targets([
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+                    tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("amax.log".into()),
+                    }),
+                ])
+                .max_file_size(5 * 1024 * 1024)
+                .build(),
+        )
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let path = db_path(app.handle());
             if let Some(parent) = path.parent() {
@@ -338,6 +453,8 @@ pub fn run() {
                 client,
                 refresh_lock: tokio::sync::Mutex::new(()),
                 low_quota_notified: Mutex::new(false),
+                last_successful_refresh: Mutex::new(None),
+                user_id_cache: Mutex::new(None),
             });
 
             let window = app.get_webview_window("main").ok_or("找不到主窗口")?;
@@ -357,9 +474,43 @@ pub fn run() {
             build_tray(&handle)?;
             start_auto_refresh(&handle);
 
+            // 启动 15 秒后自动检查更新（debug 构建跳过）；托盘菜单可手动触发
+            let updater_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+                check_for_updates(&updater_handle).await;
+            });
+
+            // 启动时显式申请一次系统通知权限
+            // （Windows 上 permission_state 恒为 Granted，此检查仅防平台差异；失败不阻塞启动）
+            let notify_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                let notification = notify_handle.notification();
+                if !matches!(
+                    notification.permission_state(),
+                    Ok(tauri_plugin_notification::PermissionState::Granted)
+                ) && let Err(error) = notification.request_permission()
+                {
+                    log::error!("申请系统通知权限失败: {error}");
+                }
+            });
+
             let startup_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                // 窗口可见启动时前端已触发 fetch_dashboard，10 秒内有成功刷新则跳过，
+                // 避免重复网络请求；窗口隐藏/前端未加载时仍兜底刷新
+                let recently_refreshed = startup_handle
+                    .state::<AppState>()
+                    .last_successful_refresh
+                    .lock()
+                    .map(|last| {
+                        last.is_some_and(|time| time.elapsed() < std::time::Duration::from_secs(10))
+                    })
+                    .unwrap_or(false);
+                if recently_refreshed {
+                    return;
+                }
                 let has_cookie = startup_handle
                     .state::<AppState>()
                     .db

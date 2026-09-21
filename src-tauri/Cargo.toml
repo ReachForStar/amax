@@ -13,10 +13,16 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-log = "2"
+tauri-plugin-updater = "2"
+log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["rustls-tls", "cookies", "json"] }
-tokio = { version = "1", features = ["full"] }
-chrono = { version = "0.4", features = ["serde"] }
+# tokio 特性裁剪：仅用 sync(Mutex)/time(sleep)/macros(join!)；runtime 由 tauri::async_runtime 提供
+tokio = { version = "1", features = ["sync", "time", "macros"] }
+# chrono 未用到 serde 序列化（时间串一律手动格式化）
+chrono = "0.4"
 rusqlite = { version = "0.34", features = ["bundled"] }
 windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }

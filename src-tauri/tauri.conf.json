@@ -23,6 +23,17 @@
       "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost; style-src 'self'; script-src 'self'"
     }
   },
+  "plugins": {
+    "updater": {
+      "pubkey": "JM5B02+ApwVCd3lhohEAG34Mdohig4rdHkbxMG3+Y4A=",
+      "endpoints": [
+        "https://github.com/ReachForStar/amax/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": ["msi"],

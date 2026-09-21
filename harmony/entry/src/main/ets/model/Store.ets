@@ -163,8 +163,9 @@ export async function getDailySnapshots(startDate: string, endDate: string): Pro
     resultSet = await requireDb().querySql(
       `SELECT date(saved_at, 'localtime') AS day, today_yuan, total_tokens, remaining, request_count
        FROM dashboard_snapshot
-       WHERE id IN (SELECT MAX(id) FROM dashboard_snapshot GROUP BY date(saved_at, 'localtime'))
-         AND day BETWEEN ? AND ?
+       WHERE id IN (SELECT MAX(id) FROM dashboard_snapshot
+                    WHERE date(saved_at, 'localtime') BETWEEN ? AND ?
+                    GROUP BY date(saved_at, 'localtime'))
        ORDER BY day`,
       [startDate, endDate]);
     // 列索引一次取出，避免逐行重复解析列名

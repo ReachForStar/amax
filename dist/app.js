@@ -420,12 +420,32 @@ async function setupEventListener() {
   }
 }
 
+// ═══ 统计页依赖按需加载 ═══
+// chart.umd.js（206KB）与 xlsx.full.min.js（952KB）只在统计页使用，
+// 启动时不再同步加载，进入统计页 / 首次导出时动态注入（同源脚本符合 CSP script-src 'self'）
+const scriptPromises = {};
+function loadScript(src) {
+  if (!scriptPromises[src]) {
+    scriptPromises[src] = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = src;
+      script.onload = () => resolve();
+      script.onerror = () => { delete scriptPromises[src]; reject(new Error('加载 ' + src + ' 失败')); };
+      document.head.appendChild(script);
+    });
+  }
+  return scriptPromises[src];
+}
+const ensureChartLib = () => loadScript('vendor/chart.umd.js');
+const ensureXlsxLib = () => loadScript('vendor/xlsx.full.min.js');
+
 // ═══ 统计页 ═══
 const statsCharts = { trend: null, requests: null, model: null, remaining: null };
 let statsUsage = null;   // fetch_usage_stats 结果
 let statsLocal = null;   // get_local_stats 结果
 let statsSource = 'official'; // 'official' | 'local_estimate'
 let statsRange = null;   // { startDate, endDate }，内部状态用驼峰键，invoke 入参须为 camelCase
+let statsLoadSeq = 0;    // 加载序号：快速切换区间时丢弃过期响应，防止旧数据覆盖新区间
 
 function chartTheme() {
   return {
@@ -468,6 +488,12 @@ async function enterStats() {
     syncRangeInputs();
   }
   showScreen('stats');
+  try {
+    await ensureChartLib();
+  } catch (e) {
+    showBlockError(trendErrorEl, '图表库加载失败：' + getErrorMessage(e));
+    return;
+  }
   await loadStats();
 }
 
@@ -486,9 +512,17 @@ function applyCustomRange() {
   setActivePreset(null);
   if (start > end) { showRangeError('起始日期不能晚于结束日期'); return; }
   if (end > todayStr()) { showRangeError('结束日期不能超过今天'); return; }
+  if (rangeSpanDays(start, end) > 1096) { showRangeError('区间跨度不能超过 1096 天'); return; }
   statsRange = { startDate: start, endDate: end };
   hideRangeError();
   loadStats();
+}
+
+// 'YYYY-MM-DD' 字符串相差天数（UTC 构造避免夏令时误差）
+function rangeSpanDays(start, end) {
+  const [sy, sm, sd] = start.split('-').map(Number);
+  const [ey, em, ed] = end.split('-').map(Number);
+  return Math.round((Date.UTC(ey, em - 1, ed) - Date.UTC(sy, sm - 1, sd)) / 86_400_000);
 }
 
 statsBtn.addEventListener('click', enterStats);
@@ -503,10 +537,20 @@ rangeStartInput.addEventListener('change', applyCustomRange);
 rangeEndInput.addEventListener('change', applyCustomRange);
 
 async function loadStats() {
+  const seq = ++statsLoadSeq;
+  const range = statsRange;
+  if (!statsScreen.classList.contains('hidden')) {
+    trendNoteEl.textContent = '加载中…';
+  }
   const [usageResult, localResult] = await Promise.allSettled([
-    invoke('fetch_usage_stats', statsRange),
-    invoke('get_local_stats', statsRange),
+    invoke('fetch_usage_stats', range),
+    invoke('get_local_stats', range),
   ]);
+
+  // 期间已发起更新的加载、区间已被改写，或已返回看板 → 丢弃过期结果
+  if (seq !== statsLoadSeq || range !== statsRange || statsScreen.classList.contains('hidden')) {
+    return;
+  }
 
   statsLocal = localResult.status === 'fulfilled' ? localResult.value : null;
 
@@ -858,7 +902,13 @@ exportJsonBtn.addEventListener('click', () => {
     exportFileName('json'));
 });
 
-exportXlsxBtn.addEventListener('click', () => {
+exportXlsxBtn.addEventListener('click', async () => {
+  try {
+    await ensureXlsxLib();
+  } catch (e) {
+    showBlockError(modelErrorEl, 'XLSX 库加载失败：' + getErrorMessage(e));
+    return;
+  }
   const data = buildExportData();
   const wb = XLSX.utils.book_new();
 
