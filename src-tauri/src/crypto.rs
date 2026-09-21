@@ -101,13 +101,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(value: &str) -> Result<Vec<u8>, String> {
-    let bytes = value.as_bytes();
-    if !bytes.len().is_multiple_of(2) {
+    // 奇数长度即非法；长度校验与切分成对由 as_chunks 的余片一次性表达，不再分开判
+    let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err("无效的 hex 字符串".into());
     }
 
-    bytes
-        .chunks_exact(2)
+    pairs
+        .iter()
         .map(|pair| {
             let high = decode_nibble(pair[0])?;
             let low = decode_nibble(pair[1])?;
