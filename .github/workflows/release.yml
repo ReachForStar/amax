@@ -8,6 +8,9 @@
 #   MSI 文件名与 Release 标题会对不上。Cargo.toml 的 version 只用于 crate，不影响产物。
 # - CHANGELOG.md 缺对应小节只告警不失败（回退为提交列表是既定行为）。
 # - wix 配置了 zh-CN / en-US 两种语言，会各生成一个 MSI，glob 一并上传。
+# - 自动更新要求 bundle.createUpdaterArtifacts = true（生成 .sig），且
+#   latest.json 由本工作流手写：cargo tauri build 不产出清单（只有 tauri-action 会），
+#   清单缺失或不匹配会让应用内更新静默失效，所以下面几道校验一律失败而非告警。
 # - 构建产物位于工作区根 target/（Cargo workspace 根在仓库根目录）。
 # - checkout 必须 fetch-depth: 0：回退逻辑要用 git describe 找上一个标签，浅克隆下取不到。
 name: Release
@@ -72,11 +75,17 @@ jobs:
         shell: pwsh
         env:
           # updater 签名私钥（仓库 Settings → Secrets → Actions 配置，
-          # 值取本地 .tauri/amax.key 文件内容；未配置时构建不带签名，latest.json 不会生成）
+          # 值取本地 .tauri/amax.key 文件内容；口令若设在另一个 secret 里）
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          # 私钥带口令时必须一起给：CI 下缺省会按空口令解密，结果是“解密失败”而不是提示输入
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
-            Write-Host "::warning::未配置 TAURI_SIGNING_PRIVATE_KEY，本次构建不会生成更新签名（.sig / latest.json）"
+            if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq 'true') {
+              Write-Output "::error::标签构建缺少 TAURI_SIGNING_PRIVATE_KEY：产物不会有 .sig，发布后所有客户端自动更新都会在下载后验签失败"
+              exit 1
+            }
+            Write-Host "::warning::未配置 TAURI_SIGNING_PRIVATE_KEY，本次手动构建不生成更新签名"
           }
           cargo tauri build
 
@@ -84,6 +93,54 @@ jobs:
         if: always()
         shell: pwsh
         run: Get-ChildItem -Recurse target\release\bundle -ErrorAction SilentlyContinue | Select-Object FullName
+
+      - name: Generate updater manifest
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw -Encoding utf8 | ConvertFrom-Json
+          # 清单每个平台只能给一个包，双语 MSI 固定以 zh-CN 作为更新通道
+          $msiName = "AMAX.Dashboard_${version}_x64_zh-CN.msi"
+          $msi = "target/release/bundle/msi/$msiName"
+          $sig = "$msi.sig"
+          if (-not (Test-Path $msi)) { Write-Output "::error::缺少 $msi，无法生成更新清单"; exit 1 }
+          if (-not (Test-Path $sig)) {
+            Write-Output "::error::缺少 $sig：本次构建未签名（私钥缺失或无效），发布后客户端自动更新必然失败"
+            exit 1
+          }
+          # pubkey 与 .sig 都是「base64(minisign 文本块)」，第 2 行的第 3~10 字节是密钥 id。
+          # tauri build 遇到 id 不匹配只 log::warn，客户端侧表现为“下载后验签失败”，这里改成发版失败。
+          function Get-Keyid([string]$encoded) {
+            $block = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded.Trim()))
+            $bin = [Convert]::FromBase64String(($block -split '\r?\n')[1])
+            [BitConverter]::ToString($bin[2..9])
+          }
+          try {
+            $pubKeyId = Get-Keyid $conf.plugins.updater.pubkey
+            $sigKeyId = Get-Keyid (Get-Content $sig -Raw)
+          } catch {
+            Write-Output "::error::tauri.conf.json 的 pubkey 或 $sig 不是合法的 minisign 文本块：$($_.Exception.Message)"
+            exit 1
+          }
+          if ($pubKeyId -ne $sigKeyId) {
+            Write-Output "::error::签名密钥 id ($sigKeyId) 与 pubkey 的 ($pubKeyId) 不一致：私钥与配置里的公钥不是同一对，请成对更新"
+            exit 1
+          }
+          $manifest = [ordered]@{
+            version  = $version
+            pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            platforms = [ordered]@{
+              'windows-x86_64' = [ordered]@{
+                # .sig 内容已是签名文本块的 base64，清单原样引用
+                url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$msiName"
+                signature = (Get-Content $sig -Raw).Trim()
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content target/release/bundle/latest.json -Encoding utf8NoBOM
+          Get-Content target/release/bundle/latest.json
 
       - name: Upload MSI artifact (manual run only)
         if: github.event_name == 'workflow_dispatch'
