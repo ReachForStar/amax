@@ -201,21 +201,32 @@ jobs:
           draft: false
           prerelease: false
 
-      # 发布完成后拿 GitHub 自己报的资产 URL 反查清单：清单 url 不在真实资产里，
-      # 客户端就是对着一个 404 下载地址做更新（v0.2.3 首发正是这样"成功"的）。
+      # 发布完成后拿 GitHub 自己报的资产反查清单两处：
+      # url 不在真实资产里 → 客户端对着 404 下载地址做更新（v0.2.3 首发正是这样"成功"的）；
+      # signature 与线上那份 MSI 的 .sig 不一致 → 下载得到包但验签必失败（v0.2.3 手工修 url 时
+      # 顺手用本地重建的清单覆盖过线上签名，本地 MSI 与 CI MSI 字节不同，签名也就不同）。
       # 这一步只看结论、不猜规则，任何一侧改名/改名清洗规则变化都会在这里暴露。
-      - name: Verify updater manifest points at a real asset
+      - name: Verify updater manifest matches the published assets
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $url = (Get-Content target/release/bundle/latest.json -Raw -Encoding utf8 | ConvertFrom-Json).platforms.'windows-x86_64'.url
-          $assets = @(gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}" --jq '.assets[].browser_download_url')
+          $rel = "repos/$env:GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}"
+          $assets = @(gh api $rel --jq '.assets[].browser_download_url')
           if ($LASTEXITCODE -ne 0 -or -not $assets) { Write-Output "::error::读取 Release 资产列表失败"; exit 1 }
-          if ($assets -notcontains $url) {
-            Write-Output "::error::清单 url 指向的资产不存在，客户端更新会 404`n  清单: $url`n  实际资产:`n$(($assets | ForEach-Object { "  - $_" }) -join "`n")"
+          $plat = (Get-Content target/release/bundle/latest.json -Raw -Encoding utf8 | ConvertFrom-Json).platforms.'windows-x86_64'
+          if ($assets -notcontains $plat.url) {
+            Write-Output "::error::清单 url 指向的资产不存在，客户端更新会 404`n  清单: $($plat.url)`n  实际资产:`n$(($assets | ForEach-Object { "  - $_" }) -join "`n")"
             exit 1
           }
-          Write-Output "清单 url 与线上资产一致：$url"
+          $sigName = $plat.url.Split('/')[-1] + '.sig'
+          $sigId = gh api $rel --jq ".assets[] | select(.name==`"$sigName`") | .id"
+          if ($LASTEXITCODE -ne 0 -or -not $sigId) { Write-Output "::error::线上找不到 $sigName，无法校验清单签名"; exit 1 }
+          $onlineSig = ((gh api "repos/$env:GITHUB_REPOSITORY/releases/assets/$sigId" -H 'Accept: application/octet-stream') -join '').Trim()
+          if ($onlineSig -ne $plat.signature.Trim()) {
+            Write-Output "::error::清单签名与线上 $sigName 不一致，客户端下载后验签必然失败`n  清单: $($plat.signature.Substring(0, 32))...`n  线上: $($onlineSig.Substring(0, 32))..."
+            exit 1
+          }
+          Write-Output "清单 url 与签名均与线上资产一致：$($plat.url)"
