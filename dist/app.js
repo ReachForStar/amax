@@ -45,6 +45,10 @@ const modelErrorEl = $('#model-error');
 const modelBasisNoteEl = $('#model-basis-note');
 const modelListEl = $('#model-list');
 const remainingBlock = $('#remaining-block');
+const appVersionEl = $('#app-version');
+const updateStatusEl = $('#update-status');
+const checkUpdateBtn = $('#check-update-btn');
+const applyUpdateBtn = $('#apply-update-btn');
 const exportCsvBtn = $('#export-csv-btn');
 const exportJsonBtn = $('#export-json-btn');
 const exportXlsxBtn = $('#export-xlsx-btn');
@@ -244,6 +248,67 @@ configForm.addEventListener('submit', async (event) => {
   }
 });
 
+// ═══ 自动更新 ═══
+// 后端只做「检查 → 下载 → 验签」，安装会直接结束本进程（msiexec 起新版本后自动拉起），
+// 所以安装时机由「后端空闲判定 + 这里的活动上报」共同决定，用户正在用时不会被打断。
+function renderUpdateStatus(status) {
+  if (!status || !status.state) return;
+  const { state, message } = status;
+  const version = status.version ? ' v' + status.version : '';
+  updateStatusEl.classList.remove('hidden');
+  // 只有「已下载待安装」时给出抢先执行的入口；安装失败后暂存已被取走，按钮自然消失
+  applyUpdateBtn.classList.toggle('hidden', state !== 'staged');
+  switch (state) {
+    case 'checking': updateStatusEl.textContent = '正在检查更新…'; break;
+    case 'up_to_date': updateStatusEl.textContent = '已是最新版本'; break;
+    case 'downloading': updateStatusEl.textContent = `发现新版本${version}，正在后台下载并验签…`; break;
+    case 'staged': updateStatusEl.textContent = message || `发现新版本${version}`; break;
+    case 'installing': updateStatusEl.textContent = `正在安装${version}，应用即将重启…`; break;
+    case 'disabled': updateStatusEl.textContent = message || '当前构建不检查更新'; break;
+    default: updateStatusEl.textContent = `更新：${message || state}`;
+  }
+}
+
+checkUpdateBtn.addEventListener('click', async () => {
+  checkUpdateBtn.disabled = true;
+  try {
+    await invoke('check_for_updates_now');
+  } catch (e) {
+    renderUpdateStatus({ state: 'error', message: getErrorMessage(e) });
+  } finally {
+    checkUpdateBtn.disabled = false;
+  }
+});
+
+applyUpdateBtn.addEventListener('click', async () => {
+  applyUpdateBtn.disabled = true;
+  try {
+    // 成功路径不会 resolve：安装进程接管后本窗口随旧进程一起关闭
+    await invoke('apply_update_now');
+  } catch (e) {
+    renderUpdateStatus({ state: 'error', message: getErrorMessage(e) });
+  }
+});
+
+// 活动上报节流到 5 秒一次：后端要求 IDLE_AFTER 内无上报才算空闲，粗粒度足够
+let lastActivityPing = 0;
+function pingUserActivity() {
+  const now = Date.now();
+  if (now - lastActivityPing < 5000) return;
+  lastActivityPing = now;
+  invoke('report_user_activity').catch(() => { });
+}
+['pointerdown', 'keydown', 'wheel'].forEach((type) =>
+  document.addEventListener(type, pingUserActivity, { passive: true }));
+
+async function loadAppVersion() {
+  try {
+    appVersionEl.textContent = 'v' + await invoke('get_app_version');
+  } catch {
+    appVersionEl.textContent = '版本未知';
+  }
+}
+
 // ═══ 看板 ═══
 async function loadDashboard() {
   if (dashboardRequest) return dashboardRequest;
@@ -414,6 +479,11 @@ async function setupEventListener() {
       if (!configScreen.classList.contains('hidden')) return; // 已在配置页，保留更具体的状态
       hasSavedCookie = false;
       focusRelogin('登录状态已失效');
+    });
+
+    // 后台检查/下载/安装各阶段的状态：设置页状态行与「现在重启并安装」按钮的唯一来源
+    window._unlistenUpdateStatus = await listen('update://status', (event) => {
+      renderUpdateStatus(event.payload);
     });
   } catch (e) {
     console.error('监听后台刷新事件失败:', e);
@@ -940,6 +1010,7 @@ async function init() {
   }
 
   await setupEventListener();
+  await loadAppVersion();
 
   try {
     const cfg = await invoke('get_config');

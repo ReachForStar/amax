@@ -25,6 +25,22 @@ pub struct AppState {
     last_successful_refresh: Mutex<Option<std::time::Instant>>,
     /// 最近一次刷新得到的 user_id，供看板请求并行（缓存失效时自动回退重查）
     user_id_cache: Mutex<Option<i64>>,
+    /// 已下载验签、等待空闲安装的更新
+    pending_update: Mutex<Option<StagedUpdate>>,
+    /// 最近一次前端用户活动上报，窗口可见时用于空闲判定
+    last_user_active: Mutex<std::time::Instant>,
+    /// 启动定时/手动/周期三路检查互斥
+    update_check_lock: tokio::sync::Mutex<()>,
+}
+
+/// 已下载并验签、等待空闲安装的更新。
+///
+/// 分成「下载」与「安装」两步是必须的：Windows 侧 `Update::install` 拉起 msiexec 后
+/// 直接 `std::process::exit(0)`，正在用应用时调用等于当场杀掉进程，所以只能先下载好，
+/// 等无人使用再安装。
+struct StagedUpdate {
+    update: tauri_plugin_updater::Update,
+    bytes: Vec<u8>,
 }
 
 /// 校验统计区间：格式、先后、不超今天、跨度上限 1096 天
@@ -156,6 +172,32 @@ fn save_config(
 #[tauri::command]
 async fn fetch_dashboard(app: tauri::AppHandle) -> Result<api::DashboardData, AppError> {
     refresh_dashboard(&app, false, false).await
+}
+
+#[tauri::command]
+fn get_app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+/// 前端按节流上报用户活动（见 dist/app.js 的 pingUserActivity）
+#[tauri::command]
+fn report_user_activity(state: tauri::State<AppState>) {
+    if let Ok(mut last) = state.last_user_active.lock() {
+        *last = std::time::Instant::now();
+    }
+}
+
+/// 设置页「检查更新」：结果一律经 update://status 事件回前端，故不再重复发系统通知
+#[tauri::command]
+async fn check_for_updates_now(app: tauri::AppHandle) {
+    check_for_updates(&app, false).await;
+}
+
+/// 「现在重启并安装」：用户主动点即视为空闲，跳过等待
+#[tauri::command]
+async fn apply_update_now(app: tauri::AppHandle) -> Result<(), AppError> {
+    let staged = take_staged_update(&app).ok_or_else(|| AppError::input("没有已下载完成的更新"))?;
+    install_staged(&app, staged).map_err(AppError::storage)
 }
 
 fn hide_main_window(app: &tauri::AppHandle) {
@@ -291,7 +333,8 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
             "tray_update" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    check_for_updates(&app).await;
+                    // 托盘触发时界面可能根本没打开，检查结论必须走系统通知
+                    check_for_updates(&app, true).await;
                 });
             }
             "tray_show" => show_main_window(app),
@@ -323,43 +366,91 @@ fn report_refresh_error(app: &tauri::AppHandle, source: &str, error: AppError) {
     }
 }
 
-/// 检查并安装更新：从 GitHub Releases 拉取 latest.json，发现新版本即下载并安装，
-/// 安装完成后调用 tauri 核心 restart() 重启应用。
-/// 开发模式（debug 构建）与无网环境下静默跳过，失败仅记日志。
-async fn check_for_updates(app: &tauri::AppHandle) {
-    if cfg!(debug_assertions) {
-        return; // dev 运行不检查更新
+fn show_notification(app: &tauri::AppHandle, title: &str, body: &str) {
+    if let Err(error) = app.notification().builder().title(title).body(body).show() {
+        log::warn!("系统通知发送失败: {error}");
     }
+}
+
+/// 更新状态事件：设置页据此渲染版本状态行与「现在重启并安装」按钮。
+/// state ∈ disabled | checking | up_to_date | downloading | staged | installing | error
+fn emit_update_status(
+    app: &tauri::AppHandle,
+    state: &str,
+    version: Option<&str>,
+    message: Option<&str>,
+) {
+    let payload = serde_json::json!({ "state": state, "version": version, "message": message });
+    if let Err(error) = app.emit("update://status", payload) {
+        log::error!("推送更新状态失败: {error}");
+    }
+}
+
+/// 检查失败：状态行与系统通知都要留下痕迹，静默失败是自动更新最难查的问题
+fn update_failed(app: &tauri::AppHandle, message: &str, announce_result: bool) {
+    log::error!("{message}");
+    emit_update_status(app, "error", None, Some(message));
+    if announce_result {
+        show_notification(app, "⚠️ AMAX Dashboard 更新失败", message);
+    }
+}
+
+/// 检查 GitHub Releases → 后台下载并验签 → 暂存等空闲监视器安装（不在此安装，
+/// 见 [`StagedUpdate`]）。开发构建无清单可对账，直接跳过。
+///
+/// `announce_result` 用于托盘这类「没有界面可看」的触发方：把「已是最新 / 开发版不检查」
+/// 这类结论也走系统通知。新版本就绪与失败两种结果无论如何都通知——前者预告了即将重启。
+async fn check_for_updates(app: &tauri::AppHandle, announce_result: bool) {
+    if cfg!(debug_assertions) {
+        emit_update_status(app, "disabled", None, Some("开发构建不检查更新"));
+        if announce_result {
+            show_notification(app, "ℹ️ AMAX Dashboard", "开发构建不检查更新");
+        }
+        return;
+    }
+    let state = app.state::<AppState>();
+    let Ok(_check_guard) = state.update_check_lock.try_lock() else {
+        return; // 已有一路在检查，不并发下载
+    };
+    if let Some(version) = staged_version(app) {
+        // 上一轮已下载好，只等空闲安装，别重复拉包
+        let body = staged_notice(&version);
+        emit_update_status(app, "staged", Some(&version), Some(&body));
+        if announce_result {
+            show_notification(app, "⬇️ AMAX Dashboard 更新已就绪", &body);
+        }
+        return;
+    }
+
+    emit_update_status(app, "checking", None, None);
     let updater = match app.updater() {
         Ok(updater) => updater,
         Err(error) => {
-            log::error!("初始化更新器失败: {error}");
-            return;
+            return update_failed(
+                app,
+                &format!("初始化更新器失败（多为 pubkey 配置有误）: {error}"),
+                announce_result,
+            );
         }
     };
     let update = match updater.check().await {
         Ok(Some(update)) => update,
-        Ok(None) => return, // 已是最新版本
-        Err(error) => {
-            log::warn!("检查更新失败: {error}");
+        Ok(None) => {
+            emit_update_status(app, "up_to_date", None, None);
+            if announce_result {
+                show_notification(app, "✅ AMAX Dashboard", "当前已是最新版本");
+            }
             return;
         }
+        Err(error) => {
+            return update_failed(app, &format!("检查更新失败: {error}"), announce_result);
+        }
     };
-    log::info!("发现新版本 v{}，开始下载安装", update.version);
-    let notify_result = app
-        .notification()
-        .builder()
-        .title("⬇️ AMAX Dashboard 有新版本")
-        .body(format!(
-            "v{} 正在后台下载并安装，完成后将自动重启",
-            update.version
-        ))
-        .show();
-    if let Err(error) = notify_result {
-        log::warn!("更新通知发送失败: {error}");
-    }
-    if let Err(error) = update
-        .download_and_install(
+    let version = update.version.clone();
+    log::info!("发现新版本 v{version}，开始后台下载并验签");
+    emit_update_status(app, "downloading", Some(&version), None);
+    let bytes = match update
+        .download(
             // 回调签名 (chunk_len: usize, content_length: Option<u64>)
             |chunk_len, content_length| {
                 log::debug!("更新下载进度: 块 {chunk_len} 字节，总长度 {content_length:?}");
@@ -368,12 +459,107 @@ async fn check_for_updates(app: &tauri::AppHandle) {
         )
         .await
     {
-        log::error!("更新安装失败: {error}");
-        return;
+        Ok(bytes) => bytes,
+        // download() 内含 minisign 验签，失败说明签名与配置公钥不匹配或包被篡改
+        Err(error) => {
+            return update_failed(
+                app,
+                &format!("下载 v{version} 失败: {error}"),
+                announce_result,
+            );
+        }
+    };
+    let staged = match state.pending_update.lock() {
+        Ok(mut pending) => {
+            *pending = Some(StagedUpdate { update, bytes });
+            true
+        }
+        Err(_) => false,
+    };
+    if !staged {
+        return update_failed(app, "更新状态锁不可用", announce_result);
     }
-    // 安装完成（MSI/NSIS 已替换文件）后重启进入新版本
-    log::info!("更新安装完成，重启应用");
-    app.restart();
+    let body = staged_notice(&version);
+    // 阈值只在 Rust 侧定义，状态文案随事件一起下发，前端不再复制一份常量
+    emit_update_status(app, "staged", Some(&version), Some(&body));
+    show_notification(app, "⬇️ AMAX Dashboard 更新已就绪", &body);
+}
+
+/// 「已下载、等空闲安装」的文案
+fn staged_notice(version: &str) -> String {
+    format!(
+        "v{version} 已下载并验签，将在应用空闲时自动安装并重启（约 {} 秒无操作）",
+        IDLE_AFTER.as_secs()
+    )
+}
+
+fn staged_version(app: &tauri::AppHandle) -> Option<String> {
+    let state = app.state::<AppState>();
+    let pending = state.pending_update.lock().ok()?;
+    Some(pending.as_ref()?.update.version.clone())
+}
+
+fn take_staged_update(app: &tauri::AppHandle) -> Option<StagedUpdate> {
+    let state = app.state::<AppState>();
+    let mut pending = state.pending_update.lock().ok()?;
+    pending.take()
+}
+
+/// 是否到了可以安装更新的时机：主窗口隐藏/最小化说明用户不在看，
+/// 窗口可见时要求前端至少 IDLE_AFTER 没上报过活动；另外避开后台刷新在飞的瞬间。
+fn update_install_is_idle(app: &tauri::AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let being_watched = app
+        .get_webview_window("main")
+        .map(|window| {
+            window.is_visible().unwrap_or(true) && !window.is_minimized().unwrap_or(false)
+        })
+        .unwrap_or(false);
+    if being_watched {
+        let idle_for = state
+            .last_user_active
+            .lock()
+            .map(|last| last.elapsed())
+            .unwrap_or(std::time::Duration::MAX);
+        if idle_for < IDLE_AFTER {
+            return false;
+        }
+    }
+    state.refresh_lock.try_lock().is_ok()
+}
+
+/// 安装暂存的更新。成功时不会返回：Windows 的 install() 起好 msiexec 就结束了本进程，
+/// 由 MSI 的 AUTOLAUNCHAPP 拉起新版本。返回 Err 只表示「没能开始安装」，应用继续以旧版运行。
+fn install_staged(app: &tauri::AppHandle, staged: StagedUpdate) -> Result<(), String> {
+    let StagedUpdate { update, bytes } = staged;
+    let version = update.version.clone();
+    emit_update_status(app, "installing", Some(&version), None);
+    log::info!("开始安装 v{version}");
+    let result = update
+        .install(bytes)
+        .map_err(|error| format!("安装 v{version} 失败: {error}"));
+    if let Err(message) = &result {
+        log::error!("{message}");
+        emit_update_status(app, "error", Some(&version), Some(message));
+        show_notification(app, "⚠️ AMAX Dashboard 更新失败", message);
+    }
+    result
+}
+
+/// 空闲安装监视器：更新已下载好的那刻起就等着，一旦满足 [`update_install_is_idle`] 就装。
+fn start_update_installer(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(IDLE_INSTALL_POLL).await;
+            if staged_version(&handle).is_none() || !update_install_is_idle(&handle) {
+                continue;
+            }
+            if let Some(staged) = take_staged_update(&handle) {
+                let _ = install_staged(&handle, staged);
+            }
+        }
+    });
 }
 
 /// 后台刷新：成功与否返回给调用方，供自动刷新排程决定下次间隔
@@ -392,6 +578,25 @@ const AUTO_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// 刷新失败后的快速重试：60s 起，封顶 5 分钟，成功即复位
 const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(60);
 const RETRY_MAX_DELAY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// 启动后首次检查更新的延迟
+const FIRST_UPDATE_CHECK_DELAY: std::time::Duration = std::time::Duration::from_secs(15);
+/// 托盘驻留的应用可能几周不重启，只做启动一次检查会让新版本永远追不上
+const UPDATE_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+/// 窗口可见时，距最近一次用户活动满这么久才算空闲（可以安装并重启）
+const IDLE_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
+const IDLE_INSTALL_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn start_update_watch(app: &tauri::AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(FIRST_UPDATE_CHECK_DELAY).await;
+        loop {
+            check_for_updates(&handle, false).await;
+            tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
+        }
+    });
+}
 
 fn start_auto_refresh(app: &tauri::AppHandle) {
     let app_handle = app.clone();
@@ -455,6 +660,9 @@ pub fn run() {
                 low_quota_notified: Mutex::new(false),
                 last_successful_refresh: Mutex::new(None),
                 user_id_cache: Mutex::new(None),
+                pending_update: Mutex::new(None),
+                last_user_active: Mutex::new(std::time::Instant::now()),
+                update_check_lock: tokio::sync::Mutex::new(()),
             });
 
             let window = app.get_webview_window("main").ok_or("找不到主窗口")?;
@@ -473,13 +681,8 @@ pub fn run() {
             let handle = app.handle().clone();
             build_tray(&handle)?;
             start_auto_refresh(&handle);
-
-            // 启动 15 秒后自动检查更新（debug 构建跳过）；托盘菜单可手动触发
-            let updater_handle = handle.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-                check_for_updates(&updater_handle).await;
-            });
+            start_update_watch(&handle);
+            start_update_installer(&handle);
 
             // 启动时显式申请一次系统通知权限
             // （Windows 上 permission_state 恒为 Granted，此检查仅防平台差异；失败不阻塞启动）
@@ -532,6 +735,10 @@ pub fn run() {
             get_local_stats,
             fetch_usage_stats,
             login::open_login_window,
+            get_app_version,
+            report_user_activity,
+            check_for_updates_now,
+            apply_update_now,
         ])
         .run(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");

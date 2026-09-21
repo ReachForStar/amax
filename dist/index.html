@@ -50,6 +50,18 @@
         <div id="config-status" class="status hidden" role="status" aria-live="polite"></div>
         <button id="save-btn" type="submit" class="btn primary">保存并验证</button>
       </form>
+
+      <section class="update-block" aria-labelledby="update-title">
+        <div class="label-row">
+          <h2 id="update-title" class="telemetry-label">更新</h2>
+          <span id="app-version">--</span>
+        </div>
+        <p id="update-status" class="hint hidden" role="status" aria-live="polite"></p>
+        <div class="update-actions">
+          <button id="check-update-btn" type="button" class="btn secondary">检查更新</button>
+          <button id="apply-update-btn" type="button" class="btn primary hidden">现在重启并安装</button>
+        </div>
+      </section>
     </main>
   </section>
 

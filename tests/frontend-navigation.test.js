@@ -53,6 +53,10 @@ function createHarness({
   saveError,
   dashboardError,
   loginError,
+  appVersion = '0.2.3',
+  versionError,
+  checkUpdateError,
+  applyUpdateError,
 } = {}) {
   const ids = [
     'config-screen', 'dashboard-screen', 'config-status', 'skeleton', 'error-msg',
@@ -61,6 +65,8 @@ function createHarness({
     'user-requests', 'today-yuan', 'log-count', 'today-tokens', 'token-detail',
     'quota-percent', 'progress-fill', 'quota-remaining', 'quota-total', 'quota-used',
     'login-btn', 'cookie-expiry',
+    // 更新区元素
+    'app-version', 'update-status', 'check-update-btn', 'apply-update-btn',
     // 统计页与导出元素：harness 需覆盖 app.js 顶层引用的全部 #id，否则 vm 加载即抛错
     'stats-screen', 'stats-btn', 'stats-back-btn', 'range-start', 'range-end',
     'range-error', 'summary-title', 'trend-note', 'trend-error', 'trend-chart',
@@ -81,6 +87,8 @@ function createHarness({
   elements['error-msg'].classList.add('hidden');
   elements['config-status'].classList.add('hidden');
   elements['back-btn'].classList.add('hidden');
+  elements['update-status'].classList.add('hidden');
+  elements['apply-update-btn'].classList.add('hidden');
   const presets = [7, 14, 30].map((days, index) => {
     const btn = new Element();
     btn.dataset.days = String(days);
@@ -108,10 +116,17 @@ function createHarness({
       if (selector === '.range-preset') return presets;
       return [];
     },
-    addEventListener(type, handler) { documentListeners.set(type, handler); },
+    addEventListener(type, handler) {
+      // 真实 DOM 允许同一类型挂多个监听（app.js 在此同时挂 keydown 返回看板与活动上报）
+      if (!documentListeners.has(type)) documentListeners.set(type, []);
+      documentListeners.get(type).push(handler);
+    },
   };
   const invokeCalls = [];
   const saveConfigCalls = [];
+  // 更新相关命令按调用顺序记录（check / apply），活动上报只数次数（5 秒节流）
+  const updateCalls = [];
+  let activityCalls = 0;
   let resolveSaveConfig;
   const saveConfigPromise = pendingSaveConfig
     ? new Promise((resolve) => { resolveSaveConfig = resolve; })
@@ -148,6 +163,24 @@ function createHarness({
     if (command === 'fetch_usage_stats') {
       return new Promise((resolve) => usageCalls.push({ args, resolve }));
     }
+    if (command === 'get_app_version') {
+      if (versionError) throw versionError;
+      return appVersion;
+    }
+    if (command === 'check_for_updates_now') {
+      updateCalls.push('check');
+      if (checkUpdateError) throw checkUpdateError;
+      return undefined;
+    }
+    if (command === 'apply_update_now') {
+      updateCalls.push('apply');
+      if (applyUpdateError) throw applyUpdateError;
+      return undefined;
+    }
+    if (command === 'report_user_activity') {
+      activityCalls += 1;
+      return undefined;
+    }
     return undefined;
   };
   const eventHandlers = new Map();
@@ -178,7 +211,13 @@ function createHarness({
     usageCalls,
     chartStubInstances,
     confirmCalls,
+    updateCalls,
     documentListeners,
+    activityCalls: () => activityCalls,
+    // 同类型可能挂了多个监听（如 keydown：返回看板 + 活动上报），按注册顺序全部触发
+    dispatchDocument(type, event = {}) {
+      documentListeners.get(type)?.forEach((handler) => handler({ preventDefault() {}, key: '', ...event }));
+    },
     focused: () => focusedElement,
     resolveSaveConfig: () => resolveSaveConfig?.(),
     emitEvent: (name, payload) => eventHandlers.get(name)?.({ payload }),
@@ -269,7 +308,7 @@ test('Escape 应复用设置返回规则', async () => {
   await app.elements['settings-btn'].dispatch('click');
   await app.flush();
 
-  app.documentListeners.get('keydown')({ key: 'Escape' });
+  app.dispatchDocument('keydown', { key: 'Escape' });
 
   assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
   assert.equal(app.focused(), app.elements['settings-btn']);
@@ -586,6 +625,102 @@ test('非等待态收到登录事件不应改变按钮', async () => {
 
   assert.equal(app.elements['login-btn'].disabled, false);
   assert.ok(!app.invokeCalls.includes('save_config'));
+});
+
+// ═══ 自动更新 ═══
+
+test('设置页应显示当前版本并提供检查更新入口', async () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'dist', 'index.html'), 'utf8');
+  assert.match(html, /<button id="check-update-btn" type="button"/);
+  assert.match(html, /<span id="app-version">/);
+
+  const app = createHarness({ appVersion: '0.2.3' });
+  await app.flush();
+
+  assert.ok(app.invokeCalls.includes('get_app_version'));
+  assert.equal(app.elements['app-version'].textContent, 'v0.2.3');
+});
+
+test('版本读取失败不应中断启动流程', async () => {
+  const app = createHarness({ versionError: { code: 'storage', message: '不可用' } });
+  await app.flush();
+
+  assert.equal(app.elements['app-version'].textContent, '版本未知');
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+});
+
+test('点击检查更新应触发后台检查并恢复按钮', async () => {
+  const app = createHarness();
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+
+  await app.elements['check-update-btn'].dispatch('click');
+  await app.flush();
+
+  assert.deepEqual(app.updateCalls, ['check']);
+  assert.equal(app.elements['check-update-btn'].disabled, false);
+});
+
+test('更新就绪状态应展示后端下发文案并给出立即安装入口', async () => {
+  const app = createHarness();
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+
+  app.emitEvent('update://status', {
+    state: 'staged', version: '0.3.0', message: 'v0.3.0 已下载并验签，将在应用空闲时自动安装并重启（约 90 秒无操作）',
+  });
+  await app.flush();
+
+  assert.equal(app.elements['update-status'].classList.contains('hidden'), false);
+  assert.match(app.elements['update-status'].textContent, /已下载并验签/);
+  assert.equal(app.elements['apply-update-btn'].classList.contains('hidden'), false);
+});
+
+test('非就绪状态不应出现立即安装入口', async () => {
+  const app = createHarness();
+  await app.flush();
+
+  app.emitEvent('update://status', { state: 'up_to_date', version: null, message: null });
+  await app.flush();
+
+  assert.equal(app.elements['update-status'].textContent, '已是最新版本');
+  assert.equal(app.elements['apply-update-btn'].classList.contains('hidden'), true);
+});
+
+test('点击立即安装应调用 apply_update_now，失败时撤下入口', async () => {
+  const app = createHarness({ applyUpdateError: { code: 'storage', message: '安装 v0.3.0 失败: msiexec 拒绝' } });
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  app.emitEvent('update://status', { state: 'staged', version: '0.3.0', message: '就绪' });
+  await app.flush();
+
+  await app.elements['apply-update-btn'].dispatch('click');
+  await app.flush();
+
+  assert.deepEqual(app.updateCalls, ['apply']);
+  assert.match(app.elements['update-status'].textContent, /安装 v0.3.0 失败/);
+  assert.equal(app.elements['apply-update-btn'].classList.contains('hidden'), true);
+});
+
+test('用户活动应节流上报，且不与返回看板的 Escape 冲突', async () => {
+  const app = createHarness();
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+
+  app.dispatchDocument('pointerdown');
+  app.dispatchDocument('pointerdown');
+  assert.equal(app.activityCalls(), 1);
+
+  // keydown 上同时挂着「Escape 返回看板」与活动上报两个监听：Escape 照常生效，
+  // 活动上报因落在同一节流窗口内被合并，不会每个事件都打一次 IPC
+  assert.equal(app.documentListeners.get('keydown').length, 2);
+  app.dispatchDocument('keydown', { key: 'Escape' });
+  assert.equal(app.activityCalls(), 1);
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
 });
 
 // ═══ 统计页 ═══
