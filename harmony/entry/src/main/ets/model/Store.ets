@@ -9,6 +9,7 @@ const DB_NAME = 'amax_dashboard.db';
 const KEY_COOKIE = 'cookie';
 const KEY_API_KEY = 'api_key';
 const KEY_COOKIE_SOURCE = 'cookie_source';
+const KEY_COOKIE_EXPIRES_AT = 'cookie_expires_at';
 
 export interface SnapshotRow {
   savedAt: string;        // 本地时区 RFC3339
@@ -90,11 +91,23 @@ export async function getCookie(): Promise<string | null> {
   return decryptSecret(stored);
 }
 
-export async function saveCookie(plain: string, source: string): Promise<void> {
+export async function saveCookie(plain: string, source: string, expiresAt: string | null = null): Promise<void> {
   const store = requireConfig();
   await store.put(KEY_COOKIE, await encryptSecret(plain));
   await store.put(KEY_COOKIE_SOURCE, source);
+  // 有效期与 Cookie 同写同清：新凭据没带到期时间就删掉旧值，避免展示上一轮凭据的期限
+  if (expiresAt !== null && expiresAt.length > 0) {
+    await store.put(KEY_COOKIE_EXPIRES_AT, expiresAt);
+  } else {
+    await store.delete(KEY_COOKIE_EXPIRES_AT);
+  }
   await store.flush();
+}
+
+// 官网下发的凭据到期时间（本地时区 RFC3339）；未下发时为 null，仅用于展示
+export async function getCookieExpiresAt(): Promise<string | null> {
+  const stored = await requireConfig().get(KEY_COOKIE_EXPIRES_AT, '') as string;
+  return stored.length === 0 ? null : stored;
 }
 
 export async function getApiKey(): Promise<string | null> {
@@ -120,6 +133,7 @@ export async function clearCredentials(): Promise<void> {
   await store.delete(KEY_COOKIE);
   await store.delete(KEY_API_KEY);
   await store.delete(KEY_COOKIE_SOURCE);
+  await store.delete(KEY_COOKIE_EXPIRES_AT);
   await store.flush();
 }
 

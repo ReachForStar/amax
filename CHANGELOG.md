@@ -9,9 +9,23 @@
 ### 新增
 
 - **桌面端官网 WebView 登录获取 Cookie**（获取方式对齐手机端）：配置页新增“使用官网登录获取”主按钮，点击后在应用内打开官网登录窗口，登录成功自动提取整串 Session Cookie（含 HTTP-only）并复用现有保存验证链路进入看板；关闭登录窗口视为取消，约 10 分钟未完成登录则超时提示
-  - 新增后端 command `open_login_window` 与模块 `src-tauri/src/login.rs`（基于 Tauri `WebviewWindow::cookies_for_url`，无新增依赖）
-  - 新增事件：`login://success`（携带 Cookie）、`login://cancelled`、`login://timeout`
+  - 新增后端 command `open_login_window` 与模块 `src-tauri/src/error.rs`、`src-tauri/src/login.rs`（基于 Tauri `WebviewWindow::cookies_for_url`，无新增依赖）
+  - 新增事件：`login://success`（携带 Cookie 与服务端下发的到期时间）、`login://cancelled`、`login://timeout`
   - 手动粘贴保留为兜底路径，配置页文案相应降级
+- **结构化错误契约**（桌面端）：所有 IPC command 的失败载荷由裸字符串改为 `{ code, message }`，`code` 为 `auth` / `network` / `data` / `input` / `storage` 五类；前端按 `code` 而非文案子串分支，网络故障不再被显示成“Cookie 失效”
+- **认证失败一键重登**（两端）：凭据失效时统一落到配置页并直接指向登录按钮（桌面端聚焦“使用官网登录获取”，手机端提示“前往登录（推荐）”）；后台与启动定时刷新撞上失效时，桌面端广播 `auth://expired` 主动引导重登，不再让看板静默陈旧
+- **凭据有效期展示**（两端，仅展示不拦截）：登录窗能读到官网下发的 `Expires` 时，配置页显示“凭据有效期至 …（官网下发，仅供展示）”，读不到则明示“官网未下发过期时间，失效由服务端判定”；手机端经 `WebCookieManager.fetchAllCookies`（API 23）读取到期属性
+- 手机端登录页补齐 10 分钟等待看门狗（对齐桌面版），超时自动返回配置页并给出下一步提示；配置页补齐 `onPageShow` 重读凭据状态，从登录页手动返回后按钮状态即时正确
+
+### 变更
+
+- Cookie 有效期只由官网下发、只用于展示：手动粘贴路径保存时会清掉上一次登录留下的有效期，避免展示与当前凭据不匹配的时间
+- 手机端跨页认证提示统一收进 `AppStorage` 的 `authNotice` 单通道（登录超时、看板失效、凭据无法解密共用），由配置页一次性消费
+
+### 修复
+
+- 修复统计页 Cookie 失效被静默降级：`/v1/logs/token-usage/by-model` 返回 401/403 时原实现被包成“用量查询失败: …”，不带认证语义，导致统计页只在本地估算上标注一句而不引导重登；现按状态码统一分级为认证错误
+- 修复 429 与 5xx 被当成认证错误：原桌面端把所有非 2xx 都冠以“认证失败”，服务端限流或故障会把用户无端踢回配置页；现 `429`/`5xx` 归为可重试的网络错误
 
 ## [0.2.1] - 2026-08-02
 

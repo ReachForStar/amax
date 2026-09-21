@@ -3,6 +3,9 @@ import {
   formatTokens,
   formatYuan,
   parseSessionCookie,
+  parseCookieExpiry,
+  formatLocalDateTime,
+  localRfc3339,
   classifyHttpError,
   ApiError
 } from '../main/ets/common/Format';
@@ -50,6 +53,36 @@ export default function formatTest() {
     });
     it('apiError_auth_flag_explicit_true', 0, () => {
       expect(new ApiError('msg', true).isAuthError).assertTrue();
+    });
+    it('parseCookieExpiry_session_cookie_has_no_expiry', 0, () => {
+      const now = new Date('2026-09-20T00:00:00Z');
+      expect(parseCookieExpiry('Thu, 31 Dec 2099 23:59:59 GMT', true, now)).assertNull();
+    });
+    it('parseCookieExpiry_empty_and_sentinel_values', 0, () => {
+      const now = new Date('2026-09-20T00:00:00Z');
+      // 未设 Expires 的 Cookie 在 Chromium 侧为 -1（ArkWeb 以字符串透出），0 视为无效
+      expect(parseCookieExpiry('', false, now)).assertNull();
+      expect(parseCookieExpiry('-1', false, now)).assertNull();
+      expect(parseCookieExpiry('0', false, now)).assertNull();
+      expect(parseCookieExpiry('not-a-date', false, now)).assertNull();
+    });
+    it('parseCookieExpiry_past_is_null', 0, () => {
+      const now = new Date('2026-09-20T00:00:00Z');
+      expect(parseCookieExpiry('Thu, 01 Jan 2026 00:00:00 GMT', false, now)).assertNull();
+    });
+    it('parseCookieExpiry_rfc7601_and_epoch_use_same_instant', 0, () => {
+      const now = new Date('2026-09-20T00:00:00Z');
+      // 文档口径：expiresDate 为 'Wdy, DD Mon YYYY HH:MM:SS GMT'；数字串按秒/毫秒兜底
+      const fromText = parseCookieExpiry('Thu, 31 Dec 2099 23:59:59 GMT', false, now);
+      const fromSeconds = parseCookieExpiry('4102444799', false, now);
+      const fromMillis = parseCookieExpiry('4102444799000', false, now);
+      const expected = localRfc3339(new Date('Thu, 31 Dec 2099 23:59:59 GMT'));
+      expect(fromText).assertEqual(expected);
+      expect(fromSeconds).assertEqual(expected);
+      expect(fromMillis).assertEqual(expected);
+    });
+    it('formatLocalDateTime_precision_to_minute', 0, () => {
+      expect(formatLocalDateTime(new Date(2026, 8, 20, 7, 5, 0))).assertEqual('2026-09-20 07:05');
     });
   });
 }

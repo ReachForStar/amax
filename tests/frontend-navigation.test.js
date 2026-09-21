@@ -55,7 +55,7 @@ function createHarness({
     'config-form', 'refresh-btn', 'settings-btn', 'last-updated', 'user-name',
     'user-requests', 'today-yuan', 'log-count', 'today-tokens', 'token-detail',
     'quota-percent', 'progress-fill', 'quota-remaining', 'quota-total', 'quota-used',
-    'login-btn',
+    'login-btn', 'cookie-expiry',
     // 统计页与导出元素：harness 需覆盖 app.js 顶层引用的全部 #id，否则 vm 加载即抛错
     'stats-screen', 'stats-btn', 'stats-back-btn', 'range-start', 'range-end',
     'range-error', 'summary-title', 'trend-note', 'trend-error', 'trend-chart',
@@ -87,19 +87,21 @@ function createHarness({
     querySelectorAll() { return []; },
   };
   const invokeCalls = [];
+  const saveConfigCalls = [];
   let resolveSaveConfig;
   const saveConfigPromise = pendingSaveConfig
     ? new Promise((resolve) => { resolveSaveConfig = resolve; })
     : null;
-  const invoke = async (command) => {
+  const invoke = async (command, args) => {
     invokeCalls.push(command);
     if (command === 'get_config') {
       if (configError || (configErrorOnSettings && invokeCalls.filter((call) => call === 'get_config').length > 1)) {
-        throw configError || '数据库不可用';
+        throw configError ?? { code: 'storage', message: '数据库不可用' };
       }
-      return config ?? { has_cookie: true, has_api_key: false, expired: false };
+      return config ?? { has_cookie: true, has_api_key: false, cookie_expires_at: null };
     }
     if (command === 'save_config') {
+      saveConfigCalls.push(args);
       if (saveError) throw saveError;
       if (saveConfigPromise) return saveConfigPromise;
       return undefined;
@@ -136,6 +138,7 @@ function createHarness({
   return {
     elements,
     invokeCalls,
+    saveConfigCalls,
     confirmCalls,
     documentListeners,
     focused: () => focusedElement,
@@ -213,7 +216,7 @@ test('设置读取失败时应停留看板并显示错误', async () => {
 });
 
 test('首次配置页不应显示返回按钮', async () => {
-  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, cookie_expires_at: null } });
   await app.flush();
 
   assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
@@ -262,7 +265,7 @@ test('保存中应标记忙碌、禁用双按钮并阻止返回', async () => {
 });
 
 test('保存失败应恢复忙碌状态并保留输入', async () => {
-  const app = createHarness({ saveError: '保存失败' });
+  const app = createHarness({ saveError: { code: 'storage', message: '本地数据库操作失败' } });
   await app.flush();
   await app.elements['settings-btn'].dispatch('click');
   await app.flush();
@@ -276,11 +279,50 @@ test('保存失败应恢复忙碌状态并保留输入', async () => {
   assert.equal(app.elements['save-btn'].disabled, false);
   assert.equal(app.elements['back-btn'].disabled, false);
   assert.equal(app.elements['cookie-input'].value, cookie);
-  assert.match(app.elements['config-status'].textContent, /连接失败：保存失败/);
+  assert.match(app.elements['config-status'].textContent, /连接失败：本地数据库操作失败/);
+});
+
+test('认证失败应一键重登：进配置页、提示点登录按钮并聚焦', async () => {
+  const app = createHarness({ dashboardError: { code: 'auth', message: 'Cookie 无效或已过期, 请重新登录获取' } });
+  await app.flush();
+
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), true);
+  assert.match(app.elements['config-status'].textContent,
+    /Cookie 无效或已过期, 请重新登录获取。请点击「使用官网登录获取」/);
+  assert.equal(app.focused(), app.elements['login-btn']);
+  assert.equal(app.elements['login-btn'].disabled, false);
+  // 返回入口指向失效凭据，不能再回到陈旧看板
+  assert.equal(app.elements['back-btn'].classList.contains('hidden'), true);
+});
+
+test('网络错误应留在看板显示重试文案，不引导重登', async () => {
+  const app = createHarness({
+    dashboardError: { code: 'network', message: '网络连接失败, 请检查网络或代理设置' },
+  });
+  await app.flush();
+
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), true);
+  assert.match(app.elements['error-msg'].textContent,
+    /^网络连接失败：网络连接失败, 请检查网络或代理设置$/);
+  assert.doesNotMatch(app.elements['error-msg'].textContent, /使用官网登录获取/);
+});
+
+test('契约错误按通用获取失败提示', async () => {
+  const app = createHarness({
+    dashboardError: { code: 'data', message: '数据获取失败, 官网返回 HTTP 404' },
+  });
+  await app.flush();
+
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+  assert.match(app.elements['error-msg'].textContent, /^获取数据失败：数据获取失败, 官网返回 HTTP 404$/);
 });
 
 test('保存成功但认证失败应恢复状态、保留输入和错误', async () => {
-  const app = createHarness({ dashboardError: '401 认证失败' });
+  const app = createHarness({
+    dashboardError: { code: 'auth', message: 'Cookie 无效或已过期, 请重新登录获取' },
+  });
   await app.flush();
   await app.elements['settings-btn'].dispatch('click');
   await app.flush();
@@ -294,7 +336,8 @@ test('保存成功但认证失败应恢复状态、保留输入和错误', async
   assert.equal(app.elements['save-btn'].disabled, false);
   assert.equal(app.elements['back-btn'].disabled, false);
   assert.equal(app.elements['cookie-input'].value, cookie);
-  assert.match(app.elements['config-status'].textContent, /Cookie 无效或已过期，请重新获取/);
+  assert.match(app.elements['config-status'].textContent,
+    /Cookie 无效或已过期, 请重新登录获取。请点击「使用官网登录获取」/);
   assert.equal(app.elements['back-btn'].classList.contains('hidden'), true);
 });
 
@@ -329,7 +372,7 @@ test('配置页应提供官网登录按钮且手动粘贴降级为兜底', () =>
 });
 
 test('点击登录按钮应调用 open_login_window 并进入等待态', async () => {
-  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, cookie_expires_at: null } });
   await app.flush();
 
   await app.elements['login-btn'].dispatch('click');
@@ -343,8 +386,8 @@ test('点击登录按钮应调用 open_login_window 并进入等待态', async (
 
 test('打开登录窗口失败应恢复按钮并提示', async () => {
   const app = createHarness({
-    config: { has_cookie: false, has_api_key: false, expired: false },
-    loginError: '创建登录窗口失败',
+    config: { has_cookie: false, has_api_key: false, cookie_expires_at: null },
+    loginError: { code: 'storage', message: '创建登录窗口失败' },
   });
   await app.flush();
 
@@ -357,7 +400,7 @@ test('打开登录窗口失败应恢复按钮并提示', async () => {
 });
 
 test('登录成功应保存 Cookie 并进入看板', async () => {
-  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, cookie_expires_at: null } });
   await app.flush();
 
   await app.elements['login-btn'].dispatch('click');
@@ -366,15 +409,31 @@ test('登录成功应保存 Cookie 并进入看板', async () => {
   await app.flush();
 
   assert.ok(app.invokeCalls.includes('save_config'));
+  assert.equal(app.saveConfigCalls.at(-1).expiresAt, null);
   assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
   assert.equal(app.elements['config-form'].getAttribute('aria-busy'), 'false');
   assert.equal(app.elements['login-btn'].disabled, false);
 });
 
+test('登录窗口下发到期时间应透传保存并展示', async () => {
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, cookie_expires_at: null } });
+  await app.flush();
+
+  await app.elements['login-btn'].dispatch('click');
+  await app.flush();
+  app.emitEvent('login://success', { cookie: 'session=webview-cookie', expires_at: '2026-12-31T08:00:00+00:00' });
+  await app.flush();
+
+  assert.equal(app.saveConfigCalls.at(-1).expiresAt, '2026-12-31T08:00:00+00:00');
+  const expiry = app.elements['cookie-expiry'];
+  assert.equal(expiry.classList.contains('hidden'), false);
+  assert.match(expiry.textContent, /^凭据有效期至 .+（官网下发，仅供展示）$/);
+});
+
 test('登录成功后认证失败应回到配置页并提示', async () => {
   const app = createHarness({
-    config: { has_cookie: false, has_api_key: false, expired: false },
-    dashboardError: '401 认证失败',
+    config: { has_cookie: false, has_api_key: false, cookie_expires_at: null },
+    dashboardError: { code: 'auth', message: 'Cookie 无效或已过期, 请重新登录获取' },
   });
   await app.flush();
 
@@ -388,8 +447,71 @@ test('登录成功后认证失败应回到配置页并提示', async () => {
   assert.equal(app.elements['login-btn'].disabled, false);
 });
 
+test('手动粘贴保存应清掉上次登录留下的有效期', async () => {
+  const app = createHarness({ config: { has_cookie: true, has_api_key: false, cookie_expires_at: '2026-12-31T08:00:00+00:00' } });
+  await app.flush();
+  assert.match(app.elements['cookie-expiry'].textContent, /^凭据有效期至 /);
+
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  app.elements['cookie-input'].value = `session=${'m'.repeat(50)}`;
+  await app.elements['config-form'].dispatch('submit');
+  await app.flush();
+
+  assert.equal(app.saveConfigCalls.at(-1).expiresAt, null);
+  assert.equal(app.elements['cookie-expiry'].textContent, '官网未下发过期时间，失效由服务端判定');
+});
+
+test('官网未下发有效期时应明示由服务端判定', async () => {
+  const app = createHarness({ config: { has_cookie: true, has_api_key: false, cookie_expires_at: null } });
+  await app.flush();
+
+  assert.equal(app.elements['cookie-expiry'].classList.contains('hidden'), false);
+  assert.equal(app.elements['cookie-expiry'].textContent, '官网未下发过期时间，失效由服务端判定');
+});
+
+test('无凭据时不显示有效期说明', async () => {
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, cookie_expires_at: null } });
+  await app.flush();
+
+  assert.equal(app.elements['cookie-expiry'].classList.contains('hidden'), true);
+  assert.equal(app.elements['cookie-expiry'].textContent, '');
+});
+
+test('后台刷新发现凭据失效应引导重登而非停留在陈旧看板', async () => {
+  const app = createHarness();
+  await app.flush();
+  assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+
+  app.emitEvent('auth://expired');
+  await app.flush();
+
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
+  assert.match(app.elements['config-status'].textContent,
+    /登录状态已失效。请点击「使用官网登录获取」/);
+  assert.equal(app.focused(), app.elements['login-btn']);
+});
+
+test('已在配置页或保存中收到失效事件不应打断当前操作', async () => {
+  const app = createHarness({ pendingSaveConfig: true, configErrorOnSettings: false });
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+  app.elements['cookie-input'].value = `session=${'n'.repeat(50)}`;
+  app.elements['config-form'].dispatch('submit');
+  await app.flush();
+
+  app.emitEvent('auth://expired');
+  await app.flush();
+  assert.doesNotMatch(app.elements['config-status'].textContent, /登录状态已失效/);
+  assert.equal(app.elements['save-btn'].disabled, true);
+
+  app.resolveSaveConfig();
+  await app.flush();
+});
+
 test('登录取消应恢复按钮并给出提示', async () => {
-  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, cookie_expires_at: null } });
   await app.flush();
 
   await app.elements['login-btn'].dispatch('click');
@@ -403,7 +525,7 @@ test('登录取消应恢复按钮并给出提示', async () => {
 });
 
 test('登录超时应恢复按钮并提示', async () => {
-  const app = createHarness({ config: { has_cookie: false, has_api_key: false, expired: false } });
+  const app = createHarness({ config: { has_cookie: false, has_api_key: false, cookie_expires_at: null } });
   await app.flush();
 
   await app.elements['login-btn'].dispatch('click');

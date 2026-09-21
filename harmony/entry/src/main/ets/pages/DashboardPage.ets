@@ -105,6 +105,8 @@ struct DashboardPage {
         await checkLowQuota(data.percent, data.remaining, data.total);
       } catch (error) {
         if (error instanceof ApiError && error.isAuthError) {
+          // 与桌面版 auth://expired → focusRelogin 同路径：提示凭据失效并落到配置页的登录入口
+          AppStorage.setOrCreate('authNotice', `${error.message}，请重新登录`);
           await this.gotoConfig();
           return;
         }

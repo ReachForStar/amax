@@ -4,9 +4,11 @@
 // （静态接口自 API 18 废弃，当前 targetSdk API 23；官方推荐 UIContext 实例）
 import { Theme } from '../common/Theme';
 import { GridBackground } from '../common/GridBackground';
-import { ApiError } from '../common/Format';
-import { getCookie, saveCookie, saveApiKey, clearCredentials } from '../model/Store';
+import { ApiError, formatLocalDateTime } from '../common/Format';
+import { getCookie, getCookieExpiresAt, saveCookie, saveApiKey, clearCredentials } from '../model/Store';
 import { fetchDashboard } from '../model/Api';
+
+const RELOGIN_HINT = '请点击「前往登录（推荐）」重新获取';
 
 @Entry
 @Component
@@ -18,14 +20,48 @@ struct ConfigPage {
   @State statusIsError: boolean = false;
   @State busy: boolean = false;
   @State hasCookie: boolean = false;
+  @State cookieExpiresAt: string | null = null;
+  // 登录页超时等跨页提示：本页弹出时消费一次即清空
+  @StorageLink('authNotice') authNotice: string = '';
 
   async aboutToAppear(): Promise<void> {
+    await this.loadCredentialState();
+  }
+
+  // 对齐桌面版 openSettings：每次回到本页都重新读取凭据与有效期，
+  // 登录页成功或清凭据后返回不会停留在旧状态
+  async onPageShow(): Promise<void> {
+    await this.loadCredentialState();
+    if (this.authNotice.length > 0) {
+      this.setStatus(this.authNotice, true);
+      this.authNotice = '';
+    }
+  }
+
+  private async loadCredentialState(): Promise<void> {
     try {
       this.hasCookie = (await getCookie()) !== null;
+      this.cookieExpiresAt = this.hasCookie ? await getCookieExpiresAt() : null;
     } catch (error) {
       // 凭据读取失败（如密文损坏），按未登录处理
       this.hasCookie = false;
+      this.cookieExpiresAt = null;
     }
+  }
+
+  // 有效期文案：只展示服务端真实下发的值，未下发时明示"由服务端判定"，不做本地倒计时
+  private expiryText(): string {
+    if (!this.hasCookie) {
+      return '';
+    }
+    if (this.cookieExpiresAt === null) {
+      return '官网未下发过期时间，失效由服务端判定';
+    }
+    const date = new Date(this.cookieExpiresAt);
+    if (Number.isNaN(date.getTime())) {
+      return '官网未下发过期时间，失效由服务端判定';
+    }
+    return `凭据有效期至 ${formatLocalDateTime(date)}（官网下发，仅供展示）`;
   }
 
   setStatus(text: string, isError: boolean): void {
@@ -67,7 +103,8 @@ struct ConfigPage {
     this.busy = true;
     try {
       if (cookie.length > 0) {
-        await saveCookie(cookie, 'manual');
+        // 手动粘贴取不到到期时间，显式传 null 清掉上一次登录留下的值
+        await saveCookie(cookie, 'manual', null);
       }
       if (apiKey.length > 0) {
         await saveApiKey(apiKey);
@@ -77,8 +114,13 @@ struct ConfigPage {
       await fetchDashboard(stored === null ? '' : stored);
       await this.gotoDashboard();
     } catch (error) {
-      const message = error instanceof ApiError ? error.message : '保存失败，请重试';
-      this.setStatus(message, true);
+      if (error instanceof ApiError && error.isAuthError) {
+        // 认证失败指向登录入口，与桌面版 focusRelogin 同路径
+        this.setStatus(`${error.message}。${RELOGIN_HINT}`, true);
+      } else {
+        const message = error instanceof ApiError ? error.message : '保存失败，请重试';
+        this.setStatus(message, true);
+      }
       this.busy = false;
     }
   }
@@ -102,6 +144,12 @@ struct ConfigPage {
             .fontColor(Theme.ink).margin({ top: 10 })
           Text('凭据只保存在当前设备的本地应用数据中（HUKS 加密）。')
             .fontSize(13).fontColor(Theme.muted)
+
+          if (this.hasCookie) {
+            Text(this.expiryText())
+              .fontSize(11).fontColor(Theme.muted)
+              .margin({ top: -12 })
+          }
 
           if (this.hasCookie) {
             Button('重新登录（清除现有凭据）')

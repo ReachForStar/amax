@@ -59,6 +59,44 @@ export function localRfc3339(date: Date): string {
     `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${sign}${hh}:${mm}`;
 }
 
+// Cookie 到期时间戳解析：ArkWeb 的 WebHttpCookie.expiresDate 为 RFC-7601 GMT 串
+// （"Wdy, DD Mon YYYY HH:MM:SS GMT"），未设 Expires 的 Cookie 给 "-1"，故数字分支同时兜住 -1/0（视为无到期），
+// 日期串交 Date.parse；无法识别时返回 null，由调用方按"官网未下发有效期"处理，不做任何本地推断。
+function parseExpiryMillis(raw: string): number | null {
+  const value = raw.trim();
+  if (/^-?\d+(\.\d+)?$/.test(value)) {
+    const seconds = Number(value);
+    if (seconds <= 0) {
+      return null;
+    }
+    // 秒级时间戳 10 位、毫秒级 13 位；量级异常时按毫秒解释，避免乘出 5 万年后的假日期
+    return seconds < 1e11 ? seconds * 1000 : seconds;
+  }
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
+// 凭据有效期可见性判定：仅接受"属性真实存在且尚未到期"的值。
+// 会话 Cookie（浏览器关闭即失效，官网未定过期）、空值、格式不可识别、已过期一律返回 null，
+// 有效期只用于展示，绝不作为本地倒计时拦截依据（拦截一律以服务端 401/403 为准）
+export function parseCookieExpiry(expiresDate: string, isSessionCookie: boolean, now: Date): string | null {
+  if (isSessionCookie || expiresDate.length === 0) {
+    return null;
+  }
+  const millis = parseExpiryMillis(expiresDate);
+  if (millis === null || millis <= now.getTime()) {
+    return null;
+  }
+  return localRfc3339(new Date(millis));
+}
+
+// 展示用本地时间 'YYYY-MM-DD HH:MM'：有效期只精确到分钟，避免伪精确
+export function formatLocalDateTime(date: Date): string {
+  const pad = (n: number): string => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}` +
+    ` ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 // ---- 日期字符串工具（统计页区间选择用，与桌面版 app.js toDateStr/todayStr/daysAgoStr 同口径） ----
 
 // Date → 本地时区 'YYYY-MM-DD'

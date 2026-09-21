@@ -9,9 +9,11 @@
 // 4. metaViewport(true)：UA 不含 "Mobile" 时 ArkWeb 默认关闭页面 viewport meta，显式开启保证登录表单按响应式宽度渲染。
 // 5. 登录成功判据以 session Cookie 出现为准（轮询 + URL 快路径双通道）：实测官网登录成功后不发生
 //    /dashboard 重定向（Next.js 客户端路由或停留原页），仅监听 URL 跳转无法捕获。
+// 6. 有效期经 WebCookieManager.fetchAllCookies(false) 读取：fetchCookieSync 只返回 name=value 串，看不到 Expires，
+//    这条 @since 23 的接口是手机端唯一能读到 session Cookie 到期属性的通道；取不到一律按"官网未下发"处理。
 import { webview } from '@kit.ArkWeb';
 import { Theme } from '../common/Theme';
-import { parseSessionCookie } from '../common/Format';
+import { parseCookieExpiry, parseSessionCookie } from '../common/Format';
 import { saveCookie } from '../model/Store';
 
 const LOGIN_URL = 'https://ai.amaxsmp.com/login';
@@ -21,6 +23,12 @@ const DASHBOARD_PREFIX = 'https://ai.amaxsmp.com/dashboard';
 const DESKTOP_CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 const LOGIN_POLL_INTERVAL_MS = 800;
+// 登录等待上限：与桌面版 login.rs 的 LOGIN_TIMEOUT 同口径，超时关页并把提示交给配置页
+const LOGIN_TIMEOUT_MS = 10 * 60 * 1000;
+const LOGIN_TIMEOUT_NOTICE = '登录超时，请重新点击「前往登录（推荐）」或改为手动粘贴';
+// session Cookie 名与站点域：fetchAllCookies 返回全部域名的 Cookie，需自行按名+域筛选
+const SESSION_COOKIE = 'session';
+const SITE_DOMAIN = 'amaxsmp.com';
 
 @Entry
 @Component
@@ -30,15 +38,55 @@ struct LoginPage {
   // 登录成功处理中标志：轮询与 URL 快路径共用，防重入
   private handled: boolean = false;
   private pollTimer: number = -1;
+  private timeoutTimer: number = -1;
+
+  aboutToAppear(): void {
+    this.startLoginTimeout();
+  }
 
   aboutToDisappear(): void {
     this.stopPolling();
+    this.stopLoginTimeout();
   }
 
   private stopPolling(): void {
     if (this.pollTimer !== -1) {
       clearInterval(this.pollTimer);
       this.pollTimer = -1;
+    }
+  }
+
+  private startLoginTimeout(): void {
+    if (this.timeoutTimer !== -1) {
+      return;
+    }
+    this.timeoutTimer = setTimeout(() => {
+      this.onLoginTimeout();
+    }, LOGIN_TIMEOUT_MS);
+  }
+
+  private stopLoginTimeout(): void {
+    if (this.timeoutTimer !== -1) {
+      clearTimeout(this.timeoutTimer);
+      this.timeoutTimer = -1;
+    }
+  }
+
+  // 超时后本页即将弹出、无处展示提示：经 AppStorage 'authNotice' 交给配置页消费
+  private onLoginTimeout(): void {
+    this.timeoutTimer = -1;
+    if (this.handled) {
+      return;
+    }
+    this.handled = true;
+    this.stopPolling();
+    AppStorage.setOrCreate('authNotice', LOGIN_TIMEOUT_NOTICE);
+    try {
+      this.getUIContext().getRouter().back();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : JSON.stringify(error);
+      console.error(`登录超时后返回失败：${reason}`);
+      this.notice = LOGIN_TIMEOUT_NOTICE;
     }
   }
 
@@ -68,10 +116,30 @@ struct LoginPage {
     }
   }
 
+  // session Cookie 到期时间（本地时区 RFC3339）：会话 Cookie、-1、接口异常均返回 null，
+  // 不阻断登录主流程——有效期仅用于展示，拦截一律以服务端 401/403 为准
+  private async readSessionExpiry(): Promise<string | null> {
+    try {
+      const cookies = await webview.WebCookieManager.fetchAllCookies(false);
+      const session = cookies.find((cookie: webview.WebHttpCookie) =>
+        cookie.name === SESSION_COOKIE && cookie.domain.endsWith(SITE_DOMAIN));
+      if (!session) {
+        return null;
+      }
+      return parseCookieExpiry(session.expiresDate, session.isSessionCookie, new Date());
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : JSON.stringify(error);
+      console.error(`读取 Cookie 有效期失败，按未下发处理：${reason}`);
+      return null;
+    }
+  }
+
   async onLoginSuccess(cookieStr: string): Promise<void> {
     try {
+      this.stopLoginTimeout();
+      const expiresAt = await this.readSessionExpiry();
       // 存储完整 cookie 串（请求头需要完整串）；parseSessionCookie 仅用于判定登录成功
-      await saveCookie(cookieStr, 'webview');
+      await saveCookie(cookieStr, 'webview', expiresAt);
       const nav = this.getUIContext().getRouter();
       nav.clear();
       await nav.replaceUrl({ url: 'pages/DashboardPage' });
@@ -82,6 +150,7 @@ struct LoginPage {
       this.notice = '登录处理失败，请重试或返回手动粘贴';
       this.handled = false;
       this.startLoginPolling();
+      this.startLoginTimeout();
     }
   }
 

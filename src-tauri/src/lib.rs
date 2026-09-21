@@ -3,10 +3,12 @@
 mod api;
 mod crypto;
 mod db;
+mod error;
 mod login;
 
 use chrono::{Local, NaiveDate};
 use db::Db;
+use error::{AppError, poisoned};
 use std::sync::Mutex;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -21,32 +23,33 @@ pub struct AppState {
 }
 
 /// 校验统计区间：格式、先后、不超今天、跨度上限 1096 天
-fn validate_date_range(start_date: &str, end_date: &str) -> Result<(NaiveDate, NaiveDate), String> {
+fn validate_date_range(
+    start_date: &str,
+    end_date: &str,
+) -> Result<(NaiveDate, NaiveDate), AppError> {
     let start = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")
-        .map_err(|_| "起始日期格式无效，应为 YYYY-MM-DD".to_string())?;
+        .map_err(|_| AppError::input("起始日期格式无效，应为 YYYY-MM-DD"))?;
     let end = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
-        .map_err(|_| "结束日期格式无效，应为 YYYY-MM-DD".to_string())?;
+        .map_err(|_| AppError::input("结束日期格式无效，应为 YYYY-MM-DD"))?;
     if start > end {
-        return Err("起始日期不能晚于结束日期".into());
+        return Err(AppError::input("起始日期不能晚于结束日期"));
     }
     if end > Local::now().date_naive() {
-        return Err("结束日期不能超过今天".into());
+        return Err(AppError::input("结束日期不能超过今天"));
     }
     if (end - start).num_days() > 1096 {
-        return Err("区间跨度不能超过 1096 天".into());
+        return Err(AppError::input("区间跨度不能超过 1096 天"));
     }
     Ok((start, end))
 }
 
 #[tauri::command]
-fn get_config(state: tauri::State<AppState>) -> Result<serde_json::Value, String> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| "数据库状态锁已损坏".to_string())?;
+fn get_config(state: tauri::State<AppState>) -> Result<serde_json::Value, AppError> {
+    let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
     Ok(serde_json::json!({
         "has_cookie": db.has_cookie(),
         "has_api_key": db.has_api_key(),
+        "cookie_expires_at": db.get_cookie_expires_at(),
     }))
 }
 
@@ -81,15 +84,10 @@ fn get_local_stats(
     state: tauri::State<AppState>,
     start_date: String,
     end_date: String,
-) -> Result<LocalStats, String> {
+) -> Result<LocalStats, AppError> {
     validate_date_range(&start_date, &end_date)?;
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| "数据库状态锁已损坏".to_string())?;
-    let snapshots = db
-        .get_daily_snapshots(&start_date, &end_date)
-        .map_err(|error| format!("查询本地快照失败: {error}"))?;
+    let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
+    let snapshots = db.get_daily_snapshots(&start_date, &end_date)?;
     let diffs = db::derive_daily_requests(&snapshots);
     let daily = snapshots
         .iter()
@@ -122,13 +120,10 @@ async fn fetch_usage_stats(
     state: tauri::State<'_, AppState>,
     start_date: String,
     end_date: String,
-) -> Result<api::UsageStats, String> {
+) -> Result<api::UsageStats, AppError> {
     let (start, end) = validate_date_range(&start_date, &end_date)?;
     let cookie = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| "数据库状态锁已损坏".to_string())?;
+        let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
         db.get_cookie()
     };
     api::fetch_usage_stats(&state.client, &cookie.unwrap_or_default(), start, end).await
@@ -139,19 +134,17 @@ fn save_config(
     state: tauri::State<AppState>,
     cookie: String,
     api_key: String,
-) -> Result<(), String> {
+    expires_at: Option<String>,
+) -> Result<(), AppError> {
     if cookie.is_empty() && api_key.is_empty() {
-        return Err("请至少填写一项认证信息".into());
+        return Err(AppError::input("请至少填写一项认证信息"));
     }
-    let mut db = state
-        .db
-        .lock()
-        .map_err(|_| "数据库状态锁已损坏".to_string())?;
-    db.save_config(&cookie, &api_key)
+    let mut db = state.db.lock().map_err(|_| poisoned("数据库"))?;
+    db.save_config(&cookie, &api_key, expires_at.as_deref())
 }
 
 #[tauri::command]
-async fn fetch_dashboard(app: tauri::AppHandle) -> Result<api::DashboardData, String> {
+async fn fetch_dashboard(app: tauri::AppHandle) -> Result<api::DashboardData, AppError> {
     refresh_dashboard(&app, false, false).await
 }
 
@@ -190,23 +183,17 @@ async fn refresh_dashboard(
     app: &tauri::AppHandle,
     notify_low_quota: bool,
     emit_update: bool,
-) -> Result<api::DashboardData, String> {
+) -> Result<api::DashboardData, AppError> {
     let state = app.state::<AppState>();
     let _refresh_guard = state.refresh_lock.lock().await;
     let cookie = {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| "数据库状态锁已损坏".to_string())?;
+        let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
         db.get_cookie().unwrap_or_default()
     };
     let data = api::fetch_dashboard(&state.client, &cookie).await?;
 
     {
-        let db = state
-            .db
-            .lock()
-            .map_err(|_| "数据库状态锁已损坏".to_string())?;
+        let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
         db.save_snapshot(
             data.today_yuan,
             data.today_tokens,
@@ -214,21 +201,20 @@ async fn refresh_dashboard(
             data.used,
             data.total,
             data.request_count,
-        )
-        .map_err(|error| format!("保存数据快照失败: {error}"))?;
+        )?;
     }
 
     update_tray_tooltip(app, &data);
     if emit_update {
         app.emit("dashboard-updated", &data)
-            .map_err(|error| format!("推送看板更新失败: {error}"))?;
+            .map_err(|error| AppError::storage(format!("推送看板更新失败: {error}")))?;
     }
 
     let should_notify = {
         let mut notified = state
             .low_quota_notified
             .lock()
-            .map_err(|_| "通知状态锁已损坏".to_string())?;
+            .map_err(|_| poisoned("通知状态锁"))?;
         if data.percent >= 10.0 {
             *notified = false;
             false
@@ -248,7 +234,7 @@ async fn refresh_dashboard(
                 data.remaining, data.total, data.percent
             ))
             .show()
-            .map_err(|error| format!("发送额度通知失败: {error}"))?;
+            .map_err(|error| AppError::storage(format!("发送额度通知失败: {error}")))?;
     }
 
     Ok(data)
@@ -298,9 +284,20 @@ fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
+/// 后台路径（定时/托盘/启动）的刷新失败处理：认证失效广播给前端引导重登，
+/// 否则用户不主动点刷新就永远看不到 Cookie 已失效，看板会停在陈旧数据
+fn report_refresh_error(app: &tauri::AppHandle, source: &str, error: AppError) {
+    eprintln!("{source}刷新失败: {error:?}");
+    if error.is_auth()
+        && let Err(emit_error) = app.emit("auth://expired", ())
+    {
+        eprintln!("推送认证失效事件失败: {emit_error}");
+    }
+}
+
 async fn refresh_and_notify(app: &tauri::AppHandle) {
     if let Err(error) = refresh_dashboard(app, true, true).await {
-        eprintln!("后台刷新失败: {error}");
+        report_refresh_error(app, "后台", error);
     }
 }
 
@@ -335,7 +332,7 @@ pub fn run() {
                 std::fs::create_dir_all(parent)?;
             }
             let db = Db::open(&path)?;
-            let client = api::build_client().map_err(std::io::Error::other)?;
+            let client = api::build_client()?;
             app.manage(AppState {
                 db: Mutex::new(db),
                 client,
@@ -372,7 +369,7 @@ pub fn run() {
                 if has_cookie
                     && let Err(error) = refresh_dashboard(&startup_handle, false, false).await
                 {
-                    eprintln!("启动刷新失败: {error}");
+                    report_refresh_error(&startup_handle, "启动", error);
                 }
             });
             Ok(())
@@ -391,6 +388,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::error::ErrorCode;
     use super::validate_date_range;
     use chrono::{Duration, Local};
 
@@ -420,7 +418,8 @@ mod tests {
             &end.format("%Y-%m-%d").to_string(),
         )
         .expect_err("start 晚于 end 应拒绝");
-        assert!(error.contains("不能晚于"));
+        assert_eq!(error.code, ErrorCode::Input);
+        assert!(error.message.contains("不能晚于"));
     }
 
     #[test]
@@ -431,7 +430,8 @@ mod tests {
             &end.format("%Y-%m-%d").to_string(),
         )
         .expect_err("未来日期应拒绝");
-        assert!(error.contains("不能超过今天"));
+        assert_eq!(error.code, ErrorCode::Input);
+        assert!(error.message.contains("不能超过今天"));
     }
 
     #[test]
@@ -443,7 +443,8 @@ mod tests {
             &end.format("%Y-%m-%d").to_string(),
         )
         .expect_err("超 1096 天应拒绝");
-        assert!(error.contains("1096"));
+        assert_eq!(error.code, ErrorCode::Input);
+        assert!(error.message.contains("1096"));
 
         // 恰好 1096 天应通过
         let start_ok = end - Duration::days(1096);
@@ -458,7 +459,13 @@ mod tests {
 
     #[test]
     fn invalid_format_rejected() {
-        assert!(validate_date_range("2026/08/01", "2026-08-02").is_err());
-        assert!(validate_date_range("2026-02-30", "2026-08-02").is_err());
+        for (start, end) in [
+            ("2026/08/01", "2026-08-02"), // 分隔符非法
+            ("2026-02-30", "2026-08-02"), // 日期不存在
+            ("2026-08-01", "not-a-date"), // 结束日期不可解析
+        ] {
+            let error = validate_date_range(start, end).expect_err("非法日期应拒绝");
+            assert_eq!(error.code, ErrorCode::Input, "{start}~{end}");
+        }
     }
 }

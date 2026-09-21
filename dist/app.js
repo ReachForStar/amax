@@ -27,6 +27,7 @@ const dashboardData = $('#dashboard-data');
 const cookieInput = $('#cookie-input');
 const apikeyInput = $('#apikey-input');
 const loginBtn = $('#login-btn');
+const cookieExpiryEl = $('#cookie-expiry');
 const saveBtn = $('#save-btn');
 const configForm = $('#config-form');
 const backBtn = $('#back-btn');
@@ -63,6 +64,14 @@ function formatTokens(n) {
   if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
   if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
   return String(n);
+}
+
+// Rust 侧命令以 { code, message } 结构体 reject（见 src-tauri/src/error.rs）：
+// 分支判定一律用 code，message 只用于展示
+function getErrorCode(error) {
+  return error && typeof error === 'object' && typeof error.code === 'string'
+    ? error.code
+    : null;
 }
 
 function getErrorMessage(error) {
@@ -173,9 +182,34 @@ function daysAgoStr(days) {
   date.setDate(date.getDate() - (days - 1)); // 含当日，7 天即今天往前 6 天
   return toDateStr(date);
 }
-function isAuthErrorMessage(msg) { return msg.includes('认证失败'); }
-
 // ═══ 配置页 ═══
+// 认证失败统一指向登录按钮：一键重登复用 open_login_window 与 login:// 事件状态机
+function authHint(msg) { return msg + '。请点击「使用官网登录获取」'; }
+
+function focusRelogin(msg) {
+  canReturnToDashboard = false;
+  backBtn.classList.add('hidden');
+  showScreen('config');
+  setLoginPending(false);
+  setConfigBusy(false);
+  showConfigError(authHint(msg));
+  loginBtn.focus();
+}
+
+// 只展示服务端真实下发的到期时间；无值时明确说明失效由官网判定，不做本地倒计时
+function renderCookieExpiry(config) {
+  if (!config || !config.has_cookie) {
+    cookieExpiryEl.classList.add('hidden');
+    cookieExpiryEl.textContent = '';
+    return;
+  }
+  const when = config.cookie_expires_at ? new Date(config.cookie_expires_at) : null;
+  cookieExpiryEl.textContent = when && !Number.isNaN(when.getTime())
+    ? `凭据有效期至 ${when.toLocaleString('zh-CN')}（官网下发，仅供展示）`
+    : '官网未下发过期时间，失效由服务端判定';
+  cookieExpiryEl.classList.remove('hidden');
+}
+
 configForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   let cookie = cookieInput.value.trim();
@@ -195,8 +229,10 @@ configForm.addEventListener('submit', async (event) => {
   setConfigBusy(true);
 
   try {
-    await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
+    // 手动粘贴取不到到期时间，传 null 清掉上一次登录留下的值
+    await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim(), expiresAt: null });
     if (cookie) hasSavedCookie = true;
+    renderCookieExpiry({ has_cookie: hasSavedCookie, cookie_expires_at: null });
     if (await loadDashboard()) {
       setConfigBusy(false);
       resetConfigForm();
@@ -204,7 +240,7 @@ configForm.addEventListener('submit', async (event) => {
   } catch (e) {
     setConfigBusy(false);
     const msg = getErrorMessage(e);
-    showConfigError('连接失败：' + msg);
+    showConfigError(getErrorCode(e) === 'auth' ? authHint(msg) : '连接失败：' + msg);
   }
 });
 
@@ -225,14 +261,11 @@ async function loadDashboard() {
       renderDashboard(data);
       return true;
     } catch (e) {
+      const code = getErrorCode(e);
       const msg = getErrorMessage(e);
-      if (msg.includes('401') || msg.includes('认证失败')) {
-        canReturnToDashboard = false;
-        backBtn.classList.add('hidden');
-        showScreen('config');
-        showConfigError('Cookie 无效或已过期，请重新获取');
-        setConfigBusy(false);
-      } else if (msg.includes('网络') || msg.includes('timeout') || msg.includes('connect')) {
+      if (code === 'auth') {
+        focusRelogin(msg);
+      } else if (code === 'network') {
         showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '网络连接失败：') + msg);
       } else {
         showError((hasDashboardData ? '刷新失败，当前显示上次数据：' : '获取数据失败：') + msg);
@@ -300,6 +333,7 @@ async function openSettings() {
   try {
     const cfg = await invoke('get_config');
     resetConfigForm();
+    renderCookieExpiry(cfg);
     cookieInput.placeholder = cfg.has_cookie
       ? '已安全保存；不修改请留空'
       : 'session=MTc4MzQyOTkyN3xE...';
@@ -335,20 +369,28 @@ async function setupEventListener() {
     // 官网 WebView 登录：Rust 侧提取 Cookie 成功后，走现有保存验证链路
     window._unlistenLoginSuccess = await listen('login://success', async (event) => {
       if (!loginPending) return;
-      const cookie = event.payload && event.payload.cookie;
+      const payload = event.payload || {};
+      const cookie = payload.cookie;
       if (!cookie) { setLoginPending(false); showConfigError('登录成功但未取到 Cookie，请重试或改用手动粘贴'); return; }
       configStatus.className = 'status loading';
       configStatus.textContent = '已获取 Cookie，正在验证并获取数据...';
       setConfigBusy(true);
       try {
-        await invoke('save_config', { cookie, apiKey: apikeyInput.value.trim() });
+        await invoke('save_config', {
+          cookie,
+          apiKey: apikeyInput.value.trim(),
+          // 官网未下发 Expires 时为 null，配置页显示"未提供"
+          expiresAt: payload.expires_at || null,
+        });
         hasSavedCookie = true;
         setLoginPending(false);
+        renderCookieExpiry({ has_cookie: true, cookie_expires_at: payload.expires_at || null });
         if (await loadDashboard()) { setConfigBusy(false); resetConfigForm(); }
       } catch (e) {
         setConfigBusy(false);
         setLoginPending(false);
-        showConfigError('连接失败：' + getErrorMessage(e));
+        const msg = getErrorMessage(e);
+        showConfigError(getErrorCode(e) === 'auth' ? authHint(msg) : '连接失败：' + msg);
       }
     });
 
@@ -364,6 +406,14 @@ async function setupEventListener() {
       if (!loginPending) return;
       setLoginPending(false);
       showConfigError('登录超时，请重新发起或改为手动粘贴。');
+    });
+
+    // 定时/托盘后台刷新撞上凭据失效：前端否则无从得知，看板会长期停在陈旧数据
+    window._unlistenAuthExpired = await listen('auth://expired', () => {
+      if (loginPending || isSavingConfig) return;
+      if (!configScreen.classList.contains('hidden')) return; // 已在配置页，保留更具体的状态
+      hasSavedCookie = false;
+      focusRelogin('登录状态已失效');
     });
   } catch (e) {
     console.error('监听后台刷新事件失败:', e);
@@ -471,9 +521,11 @@ async function loadStats() {
     statsUsage = null;
     statsSource = 'local_estimate';
     const msg = getErrorMessage(usageResult.reason);
-    const authHint = isAuthErrorMessage(msg) ? '，可前往设置页重新获取 Cookie' : '';
-    showBlockError(trendErrorEl, '官方数据获取失败：' + msg + authHint + '。趋势与汇总已切换为本地估算。');
-    showBlockError(modelErrorEl, '官方数据不可用：' + msg + authHint);
+    const authHintText = getErrorCode(usageResult.reason) === 'auth'
+      ? '，可在设置页点「使用官网登录获取」重新登录'
+      : '';
+    showBlockError(trendErrorEl, '官方数据获取失败：' + msg + authHintText + '。趋势与汇总已切换为本地估算。');
+    showBlockError(modelErrorEl, '官方数据不可用：' + msg + authHintText);
     renderSummary(statsLocal ? statsLocal.summary : null, 'local_estimate');
     renderModelBlock(null);
   }
@@ -844,6 +896,7 @@ async function init() {
     canReturnToDashboard = false;
     backBtn.classList.add('hidden');
     hasSavedCookie = cfg.has_cookie;
+    renderCookieExpiry(cfg);
     if (cfg.has_cookie) {
       await loadDashboard();
     } else {

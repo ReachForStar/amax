@@ -187,6 +187,7 @@ struct StatsPage {
         // getCookie 在密文损坏时 reject：兜底视为无效凭据，与认证错误同路径（同看板页）
         const reason = secretError instanceof Error ? secretError.message : JSON.stringify(secretError);
         console.error(`凭据读取失败，视为无效凭据：${reason}`);
+        AppStorage.setOrCreate('authNotice', '本地凭据无法解密，请重新登录');
         await this.gotoConfig();
         return;
       }
@@ -195,6 +196,8 @@ struct StatsPage {
       for (;;) {
         const authFailed = await this.loadOnce(cookie, rangeStart, rangeEnd);
         if (authFailed) {
+          // 认证失败不静默踢回：落到配置页时给出原因，指向登录入口
+          AppStorage.setOrCreate('authNotice', '登录状态已失效，请重新登录');
           await this.gotoConfig();
           return;
         }

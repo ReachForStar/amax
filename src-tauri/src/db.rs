@@ -1,17 +1,21 @@
 //! SQLite 持久化模块 — cookie / api_key 加密存储
 
 use crate::crypto;
+use crate::error::AppError;
 use chrono::{Local, NaiveDate};
 use rusqlite::{Connection, params};
 
 const ENCRYPTED_PREFIX: &str = "dpapi:v1:";
+/// 服务端下发的 Cookie 到期时间（本地时区 RFC3339）。非机密，明文存；
+/// 仅用于展示，不参与任何失效判定（失效由服务端返回 401/403 决定）
+const KEY_COOKIE_EXPIRES_AT: &str = "cookie_expires_at";
 
 pub struct Db {
     conn: Connection,
 }
 
 impl Db {
-    pub fn open(path: &std::path::Path) -> Result<Self, rusqlite::Error> {
+    pub fn open(path: &std::path::Path) -> Result<Self, AppError> {
         let conn = Connection::open(path)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS config (
@@ -36,7 +40,7 @@ impl Db {
     }
 
     /// 旧库迁移：补齐 request_count 列；幂等，新旧表均可安全执行
-    pub fn migrate_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    pub fn migrate_schema(conn: &Connection) -> Result<(), AppError> {
         let has_column = {
             let mut statement = conn.prepare("PRAGMA table_info(dashboard_snapshot)")?;
             let mut names = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -57,8 +61,10 @@ impl Db {
         rows.next()?.map(|row| row.get(0)).transpose()
     }
 
-    fn encrypt_secret(value: &str) -> Result<String, String> {
-        crypto::encrypt(value.as_bytes()).map(|encrypted| format!("{ENCRYPTED_PREFIX}{encrypted}"))
+    fn encrypt_secret(value: &str) -> Result<String, AppError> {
+        crypto::encrypt(value.as_bytes())
+            .map(|encrypted| format!("{ENCRYPTED_PREFIX}{encrypted}"))
+            .map_err(|error| AppError::storage(format!("凭据加密失败: {error}")))
     }
 
     fn decrypt_secret(raw: String) -> Option<String> {
@@ -70,7 +76,14 @@ impl Db {
             .and_then(|bytes| String::from_utf8(bytes).ok())
     }
 
-    pub fn save_config(&mut self, cookie: &str, api_key: &str) -> Result<(), String> {
+    /// `expires_at` 与新 Cookie 同生命周期：换发凭据时若没有到期信息必须清掉旧值，
+    /// 否则上一次登录下发的日期会被当成当前凭据的有效期
+    pub fn save_config(
+        &mut self,
+        cookie: &str,
+        api_key: &str,
+        expires_at: Option<&str>,
+    ) -> Result<(), AppError> {
         let encrypted_cookie = (!cookie.is_empty())
             .then(|| Self::encrypt_secret(cookie))
             .transpose()?;
@@ -82,26 +95,34 @@ impl Db {
             return Ok(());
         }
 
-        let transaction = self.conn.transaction().map_err(|error| error.to_string())?;
+        let transaction = self.conn.transaction()?;
         if let Some(value) = encrypted_cookie {
-            transaction
-                .execute(
-                    "INSERT INTO config(key, value) VALUES('cookie', ?1)
+            transaction.execute(
+                "INSERT INTO config(key, value) VALUES('cookie', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![value],
+            )?;
+            match expires_at {
+                Some(value) => transaction.execute(
+                    "INSERT INTO config(key, value) VALUES(?1, ?2)
                      ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![value],
-                )
-                .map_err(|error| error.to_string())?;
+                    params![KEY_COOKIE_EXPIRES_AT, value],
+                )?,
+                None => transaction.execute(
+                    "DELETE FROM config WHERE key=?1",
+                    params![KEY_COOKIE_EXPIRES_AT],
+                )?,
+            };
         }
         if let Some(value) = encrypted_api_key {
-            transaction
-                .execute(
-                    "INSERT INTO config(key, value) VALUES('api_key', ?1)
-                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![value],
-                )
-                .map_err(|error| error.to_string())?;
+            transaction.execute(
+                "INSERT INTO config(key, value) VALUES('api_key', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![value],
+            )?;
         }
-        transaction.commit().map_err(|error| error.to_string())
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn get_cookie(&self) -> Option<String> {
@@ -110,6 +131,13 @@ impl Db {
 
     pub fn has_cookie(&self) -> bool {
         self.get_cookie().is_some_and(|cookie| !cookie.is_empty())
+    }
+
+    pub fn get_cookie_expires_at(&self) -> Option<String> {
+        self.get_raw(KEY_COOKIE_EXPIRES_AT)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())
     }
 
     pub fn get_api_key(&self) -> Option<String> {
@@ -128,7 +156,7 @@ impl Db {
         used: f64,
         total: f64,
         request_count: i64,
-    ) -> Result<(), rusqlite::Error> {
+    ) -> Result<(), AppError> {
         // saved_at 以本地时区 RFC3339 写入，查询侧统一用 date(saved_at, 'localtime') 取本地日期
         // （SQLite 对带偏移时间串先归一 UTC，无 'localtime' 修饰会截取成 UTC 日期）
         // 快照永久保留，供统计页按日聚合，不再做定期清理
@@ -154,7 +182,7 @@ impl Db {
         &self,
         start_date: &str,
         end_date: &str,
-    ) -> Result<Vec<DailySnapshot>, rusqlite::Error> {
+    ) -> Result<Vec<DailySnapshot>, AppError> {
         let mut statement = self.conn.prepare(
             "SELECT date(saved_at, 'localtime') AS day, today_yuan, total_tokens, remaining, request_count
              FROM dashboard_snapshot
@@ -171,7 +199,7 @@ impl Db {
                 request_count: row.get(4)?,
             })
         })?;
-        rows.collect()
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 }
 
@@ -369,6 +397,50 @@ mod tests {
     #[test]
     fn decrypt_secret_rejects_invalid_encrypted_value() {
         assert_eq!(Db::decrypt_secret("dpapi:v1:invalid".to_string()), None);
+    }
+
+    fn db_with_config(cookie: &str, api_key: &str, expires: Option<&str>) -> Db {
+        let mut db = Db::open(std::path::Path::new(":memory:")).expect("内存数据库应打开成功");
+        db.save_config(cookie, api_key, expires)
+            .expect("保存配置应成功");
+        db
+    }
+
+    #[test]
+    fn save_config_stores_expires_alongside_cookie() {
+        let db = db_with_config("session=abcdef", "", Some("2026-10-01T08:00:00+08:00"));
+        assert_eq!(
+            db.get_cookie_expires_at().as_deref(),
+            Some("2026-10-01T08:00:00+08:00")
+        );
+    }
+
+    #[test]
+    fn save_config_clears_stale_expires_when_new_cookie_has_none() {
+        // 防回归：换发凭据但没有到期信息时必须清掉旧值，不能把上次的日期当成当前有效期
+        let mut db = db_with_config("session=first", "", Some("2026-10-01T08:00:00+08:00"));
+        db.save_config("session=second", "", None)
+            .expect("更新凭据应成功");
+        assert_eq!(db.get_cookie_expires_at(), None);
+        assert_eq!(db.get_cookie().as_deref(), Some("session=second"));
+    }
+
+    #[test]
+    fn save_config_without_cookie_keeps_existing_expires() {
+        // 只更新 API Key 时凭据未变，到期时间须原样保留
+        let mut db = db_with_config("session=first", "", Some("2026-10-01T08:00:00+08:00"));
+        db.save_config("", "sk-test", None)
+            .expect("仅保存 API Key 应成功");
+        assert_eq!(
+            db.get_cookie_expires_at().as_deref(),
+            Some("2026-10-01T08:00:00+08:00")
+        );
+    }
+
+    #[test]
+    fn get_cookie_expires_at_none_when_never_saved() {
+        let db = db_with_config("session=abcdef", "", None);
+        assert_eq!(db.get_cookie_expires_at(), None);
     }
 
     #[test]

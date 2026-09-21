@@ -1,5 +1,6 @@
 //! HTTP API 模块 — 调用 AMAX 后端接口
 
+use crate::error::AppError;
 use chrono::{Datelike, Local, NaiveDate, TimeZone};
 use reqwest::header::{ACCEPT, ACCEPT_ENCODING, HeaderMap, HeaderValue, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -130,7 +131,7 @@ pub struct DashboardData {
     pub logs_available: bool,
 }
 
-pub fn build_client() -> Result<reqwest::Client, String> {
+pub fn build_client() -> Result<reqwest::Client, AppError> {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static("Mozilla/5.0"));
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -143,7 +144,29 @@ pub fn build_client() -> Result<reqwest::Client, String> {
         .timeout(Duration::from_secs(30))
         .pool_idle_timeout(Duration::from_secs(90))
         .build()
-        .map_err(|error| format!("HTTP 客户端初始化失败: {error}"))
+        .map_err(|error| AppError::storage(format!("HTTP 客户端初始化失败: {error}")))
+}
+
+/// 官网非 2xx 统一分级：401/403 是唯一能判定凭据失效的信号，
+/// 429 与服务端 5xx 属可重试故障（原实现把它们也冠以"认证失败"，会把用户误踢回配置页）
+fn status_error(status: reqwest::StatusCode, api: &str) -> AppError {
+    let code = status.as_u16();
+    if code == 401 || code == 403 {
+        return AppError::auth("Cookie 无效或已过期, 请重新登录获取");
+    }
+    if code == 429 {
+        return AppError::network("请求过于频繁, 请稍后重试");
+    }
+    if (500..=599).contains(&code) {
+        return AppError::network(format!(
+            "{api}失败, 官网暂时不可用(HTTP {code}), 请稍后重试"
+        ));
+    }
+    AppError::data(format!("{api}失败, 官网返回 HTTP {code}"))
+}
+
+fn network_error(error: reqwest::Error) -> AppError {
+    AppError::network(format!("网络连接失败, 请检查网络或代理设置: {error}"))
 }
 
 fn date_to_string(date: NaiveDate) -> String {
@@ -290,49 +313,44 @@ fn aggregate_usage(response: UsageResponse, start: NaiveDate, end: NaiveDate) ->
 }
 
 /// 获取账户信息（含认证错误分级），供看板与统计共用
-async fn fetch_user_info(client: &reqwest::Client, cookie: &str) -> Result<UserInfo, String> {
+async fn fetch_user_info(client: &reqwest::Client, cookie: &str) -> Result<UserInfo, AppError> {
     let response = client
         .get(format!("{BASE_URL}/api/user/self"))
         .header("Cookie", cookie)
         .send()
         .await
-        .map_err(|error| format!("网络连接失败, 请检查网络或代理设置: {error}"))?;
+        .map_err(network_error)?;
 
     let status = response.status();
     if !status.is_success() {
-        let detail = match status.as_u16() {
-            401 | 403 => "Cookie 无效或已过期, 请从浏览器重新获取".to_string(),
-            429 => "请求过于频繁, 请稍后重试".to_string(),
-            _ => format!("HTTP {status}"),
-        };
-        return Err(format!("认证失败: {detail}"));
+        return Err(status_error(status, "账户查询"));
     }
 
     let envelope: ApiEnvelope<UserInfo> = response
         .json()
         .await
-        .map_err(|error| format!("数据解析失败: {error}"))?;
+        .map_err(|error| AppError::data(format!("数据解析失败: {error}")))?;
     Ok(envelope.data)
 }
 
 pub async fn fetch_dashboard(
     client: &reqwest::Client,
     cookie: &str,
-) -> Result<DashboardData, String> {
+) -> Result<DashboardData, AppError> {
     if cookie.is_empty() {
-        return Err("认证失败: 未配置 Cookie".into());
+        return Err(AppError::auth("尚未配置 Cookie, 请先登录"));
     }
 
     let now = Local::now();
     let start_time = Local
         .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
         .single()
-        .ok_or_else(|| "无法计算本地日期起点".to_string())?
+        .ok_or_else(|| AppError::data("无法计算本地日期起点"))?
         .timestamp();
     let end_time = Local
         .with_ymd_and_hms(now.year(), now.month(), now.day(), 23, 59, 59)
         .single()
-        .ok_or_else(|| "无法计算本地日期终点".to_string())?
+        .ok_or_else(|| AppError::data("无法计算本地日期终点"))?
         .timestamp();
     let user = fetch_user_info(client, cookie).await?;
     let total_quota = user.quota.saturating_add(user.used_quota);
@@ -422,9 +440,9 @@ pub async fn fetch_usage_stats(
     cookie: &str,
     start: NaiveDate,
     end: NaiveDate,
-) -> Result<UsageStats, String> {
+) -> Result<UsageStats, AppError> {
     if cookie.is_empty() {
-        return Err("认证失败: 未配置 Cookie".into());
+        return Err(AppError::auth("尚未配置 Cookie, 请先登录"));
     }
     let user = fetch_user_info(client, cookie).await?;
 
@@ -432,12 +450,12 @@ pub async fn fetch_usage_stats(
         .and_hms_opt(0, 0, 0)
         .and_then(|naive| Local.from_local_datetime(&naive).single())
         .map(|dt| dt.timestamp())
-        .ok_or_else(|| "无法计算区间起点时间戳".to_string())?;
+        .ok_or_else(|| AppError::data("无法计算区间起点时间戳"))?;
     let end_time = end
         .and_hms_opt(23, 59, 59)
         .and_then(|naive| Local.from_local_datetime(&naive).single())
         .map(|dt| dt.timestamp())
-        .ok_or_else(|| "无法计算区间终点时间戳".to_string())?;
+        .ok_or_else(|| AppError::data("无法计算区间终点时间戳"))?;
 
     let response = client
         .post(format!("{BASE_URL}/v1/logs/token-usage/by-model"))
@@ -450,22 +468,19 @@ pub async fn fetch_usage_stats(
         }))
         .send()
         .await
-        .map_err(|error| format!("网络连接失败, 请检查网络或代理设置: {error}"))?;
+        .map_err(network_error)?;
 
     let status = response.status();
     if !status.is_success() {
-        let detail = match status.as_u16() {
-            401 | 403 => "Cookie 无效或已过期, 请从浏览器重新获取".to_string(),
-            429 => "请求过于频繁, 请稍后重试".to_string(),
-            _ => format!("HTTP {status}"),
-        };
-        return Err(format!("用量查询失败: {detail}"));
+        // 与账户查询同一分级：logs 接口 401 必须归 auth，否则统计页只会静默降级本地估算，
+        // 不引导重新登录
+        return Err(status_error(status, "用量查询"));
     }
 
     let payload: UsageResponse = response
         .json()
         .await
-        .map_err(|error| format!("用量数据解析失败: {error}"))?;
+        .map_err(|error| AppError::data(format!("用量数据解析失败: {error}")))?;
     Ok(aggregate_usage(payload, start, end))
 }
 
@@ -476,6 +491,34 @@ mod tests {
 
     fn day(y: i32, m: u32, d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, d).expect("合法日期")
+    }
+
+    #[test]
+    fn status_error_splits_auth_from_retryable_and_contract_failures() {
+        use super::status_error;
+        use crate::error::ErrorCode;
+        use reqwest::StatusCode;
+
+        // 401/403 是唯一判定凭据失效的状态码，看板与用量查询共用同一分级
+        for code in [StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN] {
+            let error = status_error(code, "用量查询");
+            assert_eq!(error.code, ErrorCode::Auth, "{code} 应归 auth");
+            assert!(error.is_auth());
+        }
+        // 429 与服务端 5xx 属可重试故障，不得再冠以认证语义
+        for code in [
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            let error = status_error(code, "用量查询");
+            assert_eq!(error.code, ErrorCode::Network, "{code} 应归 network");
+            assert!(!error.message.contains("Cookie"));
+        }
+        // 其余非 2xx 是接口契约异常
+        let error = status_error(StatusCode::NOT_FOUND, "账户查询");
+        assert_eq!(error.code, ErrorCode::Data);
+        assert!(error.message.contains("账户查询失败"));
     }
 
     fn raw_quota_model(name: &str, quota: f64, tokens: i64, requests: i64) -> super::ModelUsageRaw {

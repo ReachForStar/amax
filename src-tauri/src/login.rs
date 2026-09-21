@@ -5,13 +5,15 @@
 //! Tauri 文档明确 `cookies()` / `cookies_for_url()` 在 Windows 上于同步 command 或
 //! 事件处理器中调用会死锁（wry#583，须在 async command 与独立线程中读取），
 //! 故仅在 spawned 轮询任务里读取。
-//! 提取成功后广播 `login://success`（载荷为完整 Cookie 请求头串），由前端走现有
-//! save_config 保存验证链路；取消/超时分别广播 `login://cancelled` / `login://timeout`。
+//! 提取成功后广播 `login://success`（载荷为完整 Cookie 请求头串与服务端下发的到期时间），
+//! 由前端走现有 save_config 保存验证链路；取消/超时分别广播 `login://cancelled` / `login://timeout`。
 
+use chrono::{Local, TimeZone};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use crate::error::AppError;
 use tauri::{Emitter, Manager, Url};
 
 const LOGIN_URL: &str = "https://ai.amaxsmp.com/login";
@@ -22,6 +24,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(800);
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 /// 登录窗 label，同时用于 capability/窗口查找
 const LOGIN_LABEL: &str = "login";
+/// 判定登录成功的 Cookie 名，口径同手机端 parseSessionCookie
+const SESSION_COOKIE: &str = "session";
 
 /// 从 Cookie 请求头串提取 session 值，口径同手机端 Format.ets::parseSessionCookie
 fn extract_session(cookie_header: &str) -> Option<String> {
@@ -45,12 +49,36 @@ fn build_cookie_header(cookies: &[tauri::webview::Cookie<'static>]) -> String {
         .join("; ")
 }
 
-/// 从登录窗口的 Cookie 存储取整串请求头；窗口销毁竞态等错误返回 None（轮询下轮重试）
-fn fetch_cookie_header(window: &tauri::WebviewWindow) -> Option<String> {
+/// 从登录窗口的 Cookie 存储取站点 Cookie；窗口销毁竞态等错误返回 None（轮询下轮重试）
+fn fetch_site_cookies(
+    window: &tauri::WebviewWindow,
+) -> Option<Vec<tauri::webview::Cookie<'static>>> {
     let url = Url::parse(SITE_URL).ok()?;
     let cookies = window.cookies_for_url(url).ok()?;
-    let header = build_cookie_header(&cookies);
-    (!header.is_empty()).then_some(header)
+    (!cookies.is_empty()).then_some(cookies)
+}
+
+/// 本地时区 RFC3339 到期时间。只认服务端真实下发且仍在未来的时间戳：
+/// `Expiration::Session`（wry 0.55.1 由 WebView2 `IsSession==true` 或 `Expires==-1.0` 映射而来）
+/// 与 1970 一类异常值均返回 None，由前端显示"服务端未提供过期时间"。
+/// 该值只做展示，绝不用于本地失效判定或倒计时拦截。
+fn format_expiry(timestamp: i64) -> Option<String> {
+    if timestamp <= Local::now().timestamp() {
+        return None;
+    }
+    Local
+        .timestamp_opt(timestamp, 0)
+        .single()
+        .map(|datetime| datetime.to_rfc3339())
+}
+
+fn session_expires_at(cookies: &[tauri::webview::Cookie<'static>]) -> Option<String> {
+    let session = cookies
+        .iter()
+        .find(|cookie| cookie.name() == SESSION_COOKIE)?;
+    session
+        .expires_datetime()
+        .and_then(|when| format_expiry(when.unix_timestamp()))
 }
 
 /// 本次登录流程是否已结束（成功/取消/超时），用于防重入与终止轮询
@@ -59,12 +87,12 @@ fn settle(flag: &AtomicBool) -> bool {
 }
 
 #[tauri::command]
-pub async fn open_login_window(app: tauri::AppHandle) -> Result<(), String> {
+pub async fn open_login_window(app: tauri::AppHandle) -> Result<(), AppError> {
     // 幂等：窗口已存在时仅聚焦，不重复创建/重复轮询
     if let Some(existing) = app.get_webview_window(LOGIN_LABEL) {
         return existing
             .set_focus()
-            .map_err(|error| format!("聚焦登录窗口失败: {error}"));
+            .map_err(|error| AppError::storage(format!("聚焦登录窗口失败: {error}")));
     }
 
     let settled = Arc::new(AtomicBool::new(false));
@@ -72,7 +100,11 @@ pub async fn open_login_window(app: tauri::AppHandle) -> Result<(), String> {
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         LOGIN_LABEL,
-        tauri::WebviewUrl::External(LOGIN_URL.parse().map_err(|_| "登录地址无效".to_string())?),
+        tauri::WebviewUrl::External(
+            LOGIN_URL
+                .parse()
+                .map_err(|_| AppError::storage("登录地址无效"))?,
+        ),
     )
     .title("登录 AMAX")
     .inner_size(1000.0, 720.0)
@@ -85,7 +117,7 @@ pub async fn open_login_window(app: tauri::AppHandle) -> Result<(), String> {
         }
     })
     .build()
-    .map_err(|error| format!("创建登录窗口失败: {error}"))?;
+    .map_err(|error| AppError::storage(format!("创建登录窗口失败: {error}")))?;
 
     // 取消：用户成功前关窗（成功/超时路径我们自己 close()，彼时 settled 已置位不误报）
     let cancel_settled = Arc::clone(&settled);
@@ -119,17 +151,20 @@ pub async fn open_login_window(app: tauri::AppHandle) -> Result<(), String> {
                 }
                 return;
             }
-            let Some(header) = fetch_cookie_header(&poll_window) else {
+            let Some(cookies) = fetch_site_cookies(&poll_window) else {
                 continue;
             };
+            let header = build_cookie_header(&cookies);
             if extract_session(&header).is_none() {
                 continue;
             }
             if settle(&poll_settled) {
-                if let Err(error) = poll_window
-                    .app_handle()
-                    .emit("login://success", serde_json::json!({ "cookie": header }))
-                {
+                let payload = serde_json::json!({
+                    "cookie": header,
+                    // 服务端未下发到期时间时为 null，前端据此显示"未提供"
+                    "expires_at": session_expires_at(&cookies),
+                });
+                if let Err(error) = poll_window.app_handle().emit("login://success", payload) {
                     eprintln!("推送登录成功事件失败: {error}");
                 }
                 let _ = poll_window.close();
@@ -143,7 +178,8 @@ pub async fn open_login_window(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_cookie_header, extract_session};
+    use super::{build_cookie_header, extract_session, format_expiry, session_expires_at};
+    use chrono::Local;
     use tauri::webview::Cookie;
 
     fn cookie(name: &str, value: &str) -> Cookie<'static> {
@@ -189,5 +225,24 @@ mod tests {
         assert_eq!(extract_session("theme=dark"), None);
         assert_eq!(extract_session("session=; theme=dark"), None);
         assert_eq!(extract_session(""), None);
+    }
+
+    #[test]
+    fn expiry_requires_future_timestamp() {
+        let future = Local::now().timestamp() + 3600;
+        let text = format_expiry(future).expect("未来时间戳应产出到期时间");
+        // RFC3339 带时区偏移，前端 new Date() 可直接解析
+        assert!(text.contains('+') || text.contains('Z'), "{text}");
+        // 已过期与 1970（WebView2 对 Expires==0.0 的解码结果）都不算服务端下发的有效期
+        assert_eq!(format_expiry(Local::now().timestamp() - 1), None);
+        assert_eq!(format_expiry(0), None);
+    }
+
+    #[test]
+    fn expiry_none_without_session_cookie_or_expiry_attribute() {
+        // Cookie::new 不设 expires，等价于 wry 把 IsSession/Expires==-1.0 映射成的 Expiration::Session
+        assert_eq!(session_expires_at(&[cookie("theme", "dark")]), None);
+        assert_eq!(session_expires_at(&[]), None);
+        assert_eq!(session_expires_at(&[cookie("session", "abc123")]), None);
     }
 }
