@@ -32,6 +32,7 @@
 
 ### 修复
 
+- 修复自动更新源匿名不可达导致检查更新始终失败（`Could not fetch a valid release JSON from the remote`）：`tauri-plugin-updater` 的配置里没有凭据字段，运行时发的是匿名请求，而仓库是 private、GitHub 对未认证的 Release 下载请求返回 404——清单与签名都修好之后，坏的是"取不到清单"这一步。仓库已改为 public（**可见性属于更新契约**：改回 private 等于关掉自动更新），端点/清单/签名三者无需改动即通
 - 修复 v0.2.3 清单签名与线上安装包不匹配：第一次修上面的 404 时用本地重建的清单整份覆盖了线上清单，而 CI 构建的 MSI 与本地构建字节不同（6,877,184 / 6,860,800），签名自然也不同——url 通了，客户端下载完却会验签失败。现已改用线上那份 `.sig` 重建清单，并把发布末尾的反查从「只看 url 有没有资产」扩成 url + 签名两项（拿 `browser_download_url` 与线上 `.sig` 内容比对清单），手工覆盖、本地/线上任一份漂移都会当场失败
 - 修复 v0.2.3 首发清单指向不存在的资产：bundler 按 `productName` 原样命名产物（`"AMAX Dashboard_…"` 带空格），而 GitHub 创建 Release 资产时把空格换成点，清单却按磁盘名转义成 `%20` 的下载地址，客户端取更新直接 404（Release 构建本身是绿的，坏在产物内容上）。现在生成清单前先把产物名规范成点形式，使磁盘名、线上资产名、清单 url 三者恒等
 - 修复 0.2.2 的自动更新从未生效（三处同时缺失，任一处都足以让更新通道不可用）：`tauri.conf.json` 没有 `bundle.createUpdaterArtifacts`，打包根本不产 `.sig`；Release 工作流从未生成 `latest.json`，客户端请求的 `releases/latest/download/latest.json` 一直 404；配置的 `pubkey` 是 32 字节裸 Ed25519 公钥而非 minisign `.pub` 文本块的 base64，`tauri-cli` 无法解析、签名校验也不可能通过（v0.2.2 的 Release 资产确实只有两个 MSI，没有任何 `.sig`/清单）。本次三处一并修掉，并新签了一对更新密钥：配置里的 `pubkey` 取自新生成密钥对的 `.pub` 文件内容，私钥留在本机 `.tauri/`（gitignored）
