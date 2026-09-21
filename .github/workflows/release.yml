@@ -102,10 +102,14 @@ jobs:
           $version = "${{ github.ref_name }}" -replace '^v', ''
           $conf = Get-Content src-tauri/tauri.conf.json -Raw -Encoding utf8 | ConvertFrom-Json
           # 清单每个平台只能给一个包，双语 MSI 固定取 zh-CN 作为更新通道。
-          # 名字必须是"从目录里拿"而不是拼字符串：tauri-bundler 用
-          # `product_name`_版本_架构_语言 直接命名（productName "AMAX Dashboard" 含空格），
-          # 而不同 tauri-cli 对空格的清洗规则不同——0.2.2 的产物叫 AMAX.Dashboard_*，
-          # 2.11.5 实测叫 "AMAX Dashboard_*"。拼死任一形式都会在版本升级时静默取不到文件。
+          # 先把产物名里的空格规范成点：tauri-bundler 用 productName 原样命名
+          # （"AMAX Dashboard" 带空格），而 GitHub 建 Release 资产时会把空格换成点，
+          # 于是本地叫 "AMAX Dashboard_*.msi" 的文件线上变成 "AMAX.Dashboard_*.msi"。
+          # 不预先改名就只能猜平台侧的改写规则——v0.2.3 首发就猜错成 %20，清单 url 直接 404。
+          # 改名后磁盘名、资产名、清单 url 三者恒等，Create Release 的 glob 也照常命中。
+          Get-ChildItem "target/release/bundle/msi" -File | Where-Object { $_.Name -cmatch ' ' } | ForEach-Object {
+            Rename-Item -LiteralPath $_.FullName -NewName ($_.Name -replace ' ', '.')
+          }
           $msiFiles = @(Get-ChildItem "target/release/bundle/msi" -Filter '*_x64_zh-CN.msi' -File)
           if ($msiFiles.Count -ne 1) {
             Write-Output "::error::期望恰好 1 个 zh-CN MSI，实际 $($msiFiles.Count) 个：$($msiFiles.Name -join ', ')"
@@ -113,8 +117,7 @@ jobs:
           }
           $msi = $msiFiles[0]
           $msiName = $msi.Name
-          # 资产名含空格时必须按路径段转义（GitHub 下载链接走 %20），否则清单里的 url 不是合法 URI
-          $msiUrlName = [Uri]::EscapeDataString($msiName)
+          if ($msiName -cmatch ' ') { Write-Output "::error::资产名仍含空格（$msiName），清单 url 会与线上资产名不一致"; exit 1 }
           $sig = "$($msi.FullName).sig"
           if (-not (Test-Path $sig)) {
             Write-Output "::error::缺少 $msiName.sig：本次构建未签名（私钥缺失或无效），发布后客户端自动更新必然失败"
@@ -143,7 +146,7 @@ jobs:
             pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
             platforms = [ordered]@{
               'windows-x86_64' = [ordered]@{
-                url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$msiUrlName"
+                url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$msiName"
                 # .sig 内容已是签名文本块的 base64，清单原样引用
                 signature = (Get-Content $sig -Raw).Trim()
               }
@@ -197,3 +200,22 @@ jobs:
           body: ${{ steps.release_notes.outputs.body }}
           draft: false
           prerelease: false
+
+      # 发布完成后拿 GitHub 自己报的资产 URL 反查清单：清单 url 不在真实资产里，
+      # 客户端就是对着一个 404 下载地址做更新（v0.2.3 首发正是这样"成功"的）。
+      # 这一步只看结论、不猜规则，任何一侧改名/改名清洗规则变化都会在这里暴露。
+      - name: Verify updater manifest points at a real asset
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = (Get-Content target/release/bundle/latest.json -Raw -Encoding utf8 | ConvertFrom-Json).platforms.'windows-x86_64'.url
+          $assets = @(gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}" --jq '.assets[].browser_download_url')
+          if ($LASTEXITCODE -ne 0 -or -not $assets) { Write-Output "::error::读取 Release 资产列表失败"; exit 1 }
+          if ($assets -notcontains $url) {
+            Write-Output "::error::清单 url 指向的资产不存在，客户端更新会 404`n  清单: $url`n  实际资产:`n$(($assets | ForEach-Object { "  - $_" }) -join "`n")"
+            exit 1
+          }
+          Write-Output "清单 url 与线上资产一致：$url"

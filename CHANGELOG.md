@@ -32,6 +32,7 @@
 
 ### 修复
 
+- 修复 v0.2.3 首发清单指向不存在的资产：bundler 按 `productName` 原样命名产物（`"AMAX Dashboard_…"` 带空格），而 GitHub 创建 Release 资产时把空格换成点，清单却按磁盘名转义成 `%20` 的下载地址，客户端取更新直接 404（Release 构建本身是绿的，坏在产物内容上）。现在生成清单前先把产物名规范成点形式，发布末尾再加一步用 `browser_download_url` 反查清单 url 是否真有其资产，两侧规则再不一致当场失败
 - 修复 0.2.2 的自动更新从未生效（三处同时缺失，任一处都足以让更新通道不可用）：`tauri.conf.json` 没有 `bundle.createUpdaterArtifacts`，打包根本不产 `.sig`；Release 工作流从未生成 `latest.json`，客户端请求的 `releases/latest/download/latest.json` 一直 404；配置的 `pubkey` 是 32 字节裸 Ed25519 公钥而非 minisign `.pub` 文本块的 base64，`tauri-cli` 无法解析、签名校验也不可能通过（v0.2.2 的 Release 资产确实只有两个 MSI，没有任何 `.sig`/清单）。本次三处一并修掉，并新签了一对更新密钥：配置里的 `pubkey` 取自新生成密钥对的 `.pub` 文件内容，私钥留在本机 `.tauri/`（gitignored）
   - **依赖动作**：把 `.tauri/amax.key` 的内容配到 GitHub 仓库 secret `TAURI_SIGNING_PRIVATE_KEY`，否则标签构建按新加的门槛直接失败（不再有可用产物，宁可不发）
 - 修复检查更新全程静默：无论“已是最新”“下载失败”还是“无新增版本”，原实现只写日志，用户点托盘「检查更新」后没有任何反馈。现在检查结论经 `update://status` 事件驱动设置页状态行，并以系统通知兜底（应用藏在托盘时看得到）
