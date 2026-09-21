@@ -4,6 +4,19 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，小节标题必须为 `## [版本号]` 形式。
 
+## [0.2.4] - 2026-09-21
+
+本版无应用侧代码改动，改动全在发布链路上——v0.2.3 的 Release 构建是全绿的，但更新通道实际不可用（清单资产名 404、签名来自另一份构建、源不可匿名访问），三处都已修，这个版本用来证明修好的链路能由 CI 自己跑通，也给已装 0.2.3 的客户端一个真正能完成「下载 → 验签 → 空闲安装」的目标版本。
+
+### 新增
+
+- **发布 CI 两道更新通道门槛**：`release.yml` 末尾新增「Verify updater manifest matches the published assets」（拿线上 `browser_download_url` 与线上 `.sig` 内容反查清单的 url 与 signature 两项）与「Verify updater endpoint is anonymously reachable」（不带凭据探测 `tauri.conf.json` 里的端点原值，以及清单指向的更新包，任一处非 200/206 即失败）。此前 CI 只能证明"构建出来了"，证明不了"客户端拿得到"
+- 更新清单生成前先把 MSI 产物名里的空格规范成点形式，使磁盘名、线上资产名、清单 url 三者恒等，不再依赖对平台侧改名规则的猜测
+
+### 变更
+
+- **更新源改为公开访问**：仓库由 private 改为 public。`tauri-plugin-updater` 的配置里没有凭据字段，运行时 `app.updater()` 发的是匿名请求，而 GitHub 对私有仓库的未认证 Release 下载返回 404，客户端只会报 `Could not fetch a valid release JSON from the remote`。仓库可见性由此成为更新契约的一部分（已写进 `CLAUDE.md` 与 `README.md`）：改回 private 等于关掉自动更新
+
 ## [0.2.3] - 2026-09-21
 
 ### 新增
