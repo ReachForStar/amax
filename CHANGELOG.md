@@ -4,7 +4,7 @@
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，小节标题必须为 `## [版本号]` 形式。
 
-## [Unreleased]
+## [0.2.3] - 2026-09-21
 
 ### 新增
 
@@ -16,9 +16,13 @@
 - **认证失败一键重登**（两端）：凭据失效时统一落到配置页并直接指向登录按钮（桌面端聚焦“使用官网登录获取”，手机端提示“前往登录（推荐）”）；后台与启动定时刷新撞上失效时，桌面端广播 `auth://expired` 主动引导重登，不再让看板静默陈旧
 - **凭据有效期展示**（两端，仅展示不拦截）：登录窗能读到官网下发的 `Expires` 时，配置页显示“凭据有效期至 …（官网下发，仅供展示）”，读不到则明示“官网未下发过期时间，失效由服务端判定”；手机端经 `WebCookieManager.fetchAllCookies`（API 23）读取到期属性
 - 手机端登录页补齐 10 分钟等待看门狗（对齐桌面版），超时自动返回配置页并给出下一步提示；配置页补齐 `onPageShow` 重读凭据状态，从登录页手动返回后按钮状态即时正确
+- **Test CI**：新增 `.github/workflows/test.yml`，push 到 master / PR / 手动触发时在 `windows-latest` 跑 fmt、`clippy -D warnings`、`cargo test`、前端语法检查与逻辑回归；`paths-ignore` 跳过纯文档与纯鸿蒙改动，同分支旧任务自动取消
+- 新增共享检查步骤 `.github/actions/verify/action.yml`，Test CI 与 Release CI 调用同一份命令列表，避免“CI 拒绝什么”与“发布前检查什么”漂移
 
 ### 变更
 
+- **Release CI 加固**：发布前先跑同一份检查；标签号与 `tauri.conf.json` 的 `version` 不一致时直接失败；`checkout` 改 `fetch-depth: 0`（原浅克隆下“上一标签以来的提交列表”回退取不到历史，只会输出空内容）；`CHANGELOG.md` 缺小节由静默回退改为显式告警；`tauri-cli` 固定版本并缓存 `cargo-tauri.exe`；手动运行改为上传 MSI artifact
+- `crypto.rs::hex_decode` 由“先判偶数长度再 `chunks_exact(2)`”改为 `as_chunks::<2>()` + 余片判空，长度不变量与切分收敛到同一处表达，`clippy -D warnings` 基线随之转绿（CI 因此可以把它当真门槛）
 - Cookie 有效期只由官网下发、只用于展示：手动粘贴路径保存时会清掉上一次登录留下的有效期，避免展示与当前凭据不匹配的时间
 - 手机端跨页认证提示统一收进 `AppStorage` 的 `authNotice` 单通道（登录超时、看板失效、凭据无法解密共用），由配置页一次性消费
 
