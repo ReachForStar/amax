@@ -230,3 +230,34 @@ jobs:
             exit 1
           }
           Write-Output "清单 url 与签名均与线上资产一致：$($plat.url)"
+
+      # 客户端 updater 不带任何凭据（插件 Config 里根本没有凭据字段，见 src/config.rs），
+      # 所以"能不能自动更新"等价于"这个端点匿名可不可读"。仓库被改回 private、清单被删、
+      # 更新包改名，都会在这里变成失败，而不是等用户点「检查更新」才发现。
+      - name: Verify updater endpoint is anonymously reachable
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # 探测 tauri.conf.json 里的端点原值，不另写一个地址：安装包用的就是它
+          $endpoint = ((Get-Content src-tauri/tauri.conf.json -Raw -Encoding utf8 | ConvertFrom-Json).plugins.updater.endpoints)[0]
+          # 用 Invoke-WebRequest 而不是 gh：gh 会附带 token，私有仓库下探测会假绿
+          $resp = Invoke-WebRequest $endpoint -SkipHttpErrorCheck -TimeoutSec 60
+          $code = [int]$resp.StatusCode
+          if ($code -ne 200) {
+            Write-Output "::error::匿名访问更新端点得到 HTTP $code ：$endpoint`n  客户端 updater 不带凭据，仓库不是 public 或清单缺失时自动更新必然失败"
+            exit 1
+          }
+          # Release 资产按 application/octet-stream 下发，此时 .Content 是 byte[]，必须先转文本再解 JSON
+          $text = if ($resp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp.Content) } else { [string]$resp.Content }
+          $manifest = $text | ConvertFrom-Json
+          $pkg = $manifest.platforms.'windows-x86_64'
+          if (-not $pkg.url -or -not $pkg.signature) { Write-Output "::error::端点返回的清单缺 url/signature，不是 updater 能用的清单"; exit 1 }
+          # 更新包本身也要匿名可下载（私有仓库的资产同样 404）；Range 只取首字节，不拉 7MB
+          $head = Invoke-WebRequest $pkg.url -Headers @{ Range = 'bytes=0-0' } -SkipHttpErrorCheck -TimeoutSec 120
+          $pkgCode = [int]$head.StatusCode
+          if ($pkgCode -ne 200 -and $pkgCode -ne 206) {
+            Write-Output "::error::清单指向的更新包匿名不可下载（HTTP $pkgCode）：$($pkg.url)"
+            exit 1
+          }
+          Write-Output "匿名探测通过：$endpoint -> v$($manifest.version)，更新包 HTTP $pkgCode"
