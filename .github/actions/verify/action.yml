@@ -1,0 +1,49 @@
+# 桌面端与前端的共享检查步骤集，test.yml 与 release.yml 都调用它。
+#
+# 抽成 composite action 的唯一理由是让"CI 会拒绝什么"与"发布前会检查什么"
+# 永远一致：两处各写一份命令列表迟早会漂，漂的结果就是测试已经挂了、标签照样发版。
+# 要增删检查项只改这里。
+#
+# 注意：调用方的 runner 必须是 windows-latest。crate 直接依赖 windows-sys / DPAPI，
+# 非 Windows 构建下 crypto 的 encrypt/decrypt 一律返回 Err（不提供明文降级），
+# 只有 Windows 能真正跑到加解密路径；tauri 在 Linux 另需 webkit2gtk 系统包。
+name: Verify desktop
+description: cargo fmt / clippy -D warnings / test，加前端语法检查与逻辑回归
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Rust (stable)
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Rust cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: cargo fmt --check
+      shell: bash
+      run: cargo fmt --all -- --check
+
+    # -D warnings 是真门槛：clippy 基线已修干净（原 crypto.rs 的 chunks_exact_to_as_chunks
+    # 已改为 as_chunks），新告警一律视为失败，不要用 -A 绕过。
+    - name: cargo clippy -D warnings
+      shell: bash
+      run: cargo clippy --workspace --all-targets -- -D warnings
+
+    - name: cargo test
+      shell: bash
+      run: cargo test --workspace
+
+    - name: 前端语法检查
+      shell: bash
+      run: node --check dist/app.js
+
+    - name: 前端逻辑回归（node:test）
+      shell: bash
+      run: node tests/frontend-navigation.test.js

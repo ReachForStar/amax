@@ -1,0 +1,42 @@
+# Test 工作流：push 到 master、PR、手动触发时跑全部自动化检查。
+#
+# 说明：
+# - 只在 windows-latest 上跑，理由见 .github/actions/verify/action.yml 头部注释。
+# - 私有仓库的 Windows 分钟数按 Linux 的 2 倍计费，故限制触发面：
+#   仅 master 与 PR，且用 paths-ignore 跳过纯文档 / 纯鸿蒙改动
+#   （鸿蒙端不在这里测——hvigor / DevEco 工具链装不上 GitHub 托管 runner，
+#   本地用 hvigorw test，见 harmony/README.md）。
+# - concurrency 取消同分支上的旧任务，避免连推几次把分钟数烧在过期提交上。
+name: Test
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - 'harmony/**'
+      - 'docs/**'
+      - '*.md'
+      - '**/*.md'
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - 'harmony/**'
+      - 'docs/**'
+      - '*.md'
+      - '**/*.md'
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run checks
+        uses: ./.github/actions/verify

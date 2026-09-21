@@ -1,11 +1,15 @@
 # Release 工作流：推送 v* 标签时在 Windows 上构建 MSI 并发布到 GitHub Release。
-# workflow_dispatch 用于手动验证构建链路（不创建 Release）。
+# workflow_dispatch 用于手动验证构建链路（不创建 Release，产物改为上传 artifact）。
 #
 # 说明：
 # - 应用依赖 Windows DPAPI / windows-sys，仅 windows-latest 可构建，产物为 MSI。
+# - 发布前先跑与 test.yml 同一份检查（.github/actions/verify），避免“测试已挂仍发版”。
+# - 标签号必须与 src-tauri/tauri.conf.json 的 version 一致，否则直接失败：
+#   MSI 文件名与 Release 标题会对不上。Cargo.toml 的 version 只用于 crate，不影响产物。
+# - CHANGELOG.md 缺对应小节只告警不失败（回退为提交列表是既定行为）。
 # - wix 配置了 zh-CN / en-US 两种语言，会各生成一个 MSI，glob 一并上传。
 # - 构建产物位于工作区根 target/（Cargo workspace 根在仓库根目录）。
-# - Release Notes 取自 CHANGELOG.md 中与标签同版本的小节（发布前须先补充该小节），缺失时回退为提交列表。
+# - checkout 必须 fetch-depth: 0：回退逻辑要用 git describe 找上一个标签，浅克隆下取不到。
 name: Release
 
 on:
@@ -14,24 +18,55 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# 标签各自唯一，同组不取消：发布到一半被取消会留下半成品 Release。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build Windows MSI
     runs-on: windows-latest
     permissions:
       contents: write
+    env:
+      # 升级 tauri-cli 时这里与下面的缓存键一起改；版本浮动会让缓存命中错误的二进制。
+      TAURI_CLI_VERSION: '2.11.5'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Setup Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+      - name: Run checks
+        uses: ./.github/actions/verify
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
+      - name: Verify tag matches app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v', ''
+          $conf = Get-Content src-tauri/tauri.conf.json -Raw -Encoding utf8 | ConvertFrom-Json
+          if ($conf.version -ne $version) {
+            Write-Output "::error::标签 $tag 与 src-tauri/tauri.conf.json 的 version=$($conf.version) 不一致"
+            exit 1
+          }
+          $pattern = "^## \[$([regex]::Escape($version))\]"
+          if (-not (Select-String -Path CHANGELOG.md -Pattern $pattern -Quiet)) {
+            Write-Output "::warning::CHANGELOG.md 缺少 [$version] 小节，Release Notes 将回退为提交列表"
+          }
+
+      - name: Cache tauri-cli binary
+        id: tauri_cli_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri.exe
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-windows
 
       - name: Install Tauri CLI
-        run: cargo install tauri-cli --locked --version "^2"
+        if: steps.tauri_cli_cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --locked --version "${{ env.TAURI_CLI_VERSION }}"
 
       - name: Build Tauri app
         run: cargo tauri build
@@ -40,6 +75,14 @@ jobs:
         if: always()
         shell: pwsh
         run: Get-ChildItem -Recurse target\release\bundle -ErrorAction SilentlyContinue | Select-Object FullName
+
+      - name: Upload MSI artifact (manual run only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: amax-msi-${{ github.run_id }}
+          path: target/release/bundle/msi/*.msi
+          if-no-files-found: error
 
       - name: Extract release notes
         if: startsWith(github.ref, 'refs/tags/')
@@ -56,7 +99,7 @@ jobs:
             if ($m.Success) { $body = $m.Groups[1].Value.Trim() }
           }
           if (-not $body) {
-            # CHANGELOG.md 缺少对应小节时回退为上一标签以来的提交列表
+            # CHANGELOG.md 缺少对应小节时回退为上一标签以来的提交列表（需 fetch-depth: 0）
             $prev = git describe --tags --abbrev=0 "$tag^" 2>$null
             $range = if ($prev) { "$prev..$tag" } else { $tag }
             $commits = git log $range --pretty=format:"- %s"

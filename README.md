@@ -20,7 +20,7 @@
 
 ## 快速开始（桌面端）
 
-环境：Windows 10/11、Rust stable（crate 用 edition 2024，需 1.85+；本地实测 1.98.1）、`tauri-cli` 2.x（本地实测 2.11.5）、WebView2。前端测试需要 Node.js（仅用于跑 `node --test`，不参与构建）。
+环境：Windows 10/11、Rust stable（crate 用 edition 2024，本地实测 1.98.1；依赖树已不接受 1.88，`notify-rust` 4.18 声明 `rust-version = 1.89`）、`tauri-cli` 2.x（本地实测 2.11.5，release CI 固定同版本）、WebView2。前端测试需要 Node.js（CI 用 22，仅跑 `node:test`，不参与构建）。
 
 ```bash
 cargo tauri dev            # 开发运行，Rust 改动自动重编译
@@ -37,7 +37,7 @@ node --check dist/app.js
 node tests/frontend-navigation.test.js      # 前端逻辑回归（node:test + vm 沙箱）
 ```
 
-> `cargo clippy -D warnings` 在**未改动**的 `src-tauri/src/crypto.rs:110` 上即会失败（新版 clippy 的 `chunks_exact_to_as_chunks` lint）。这是既有基线，不代表你的改动引入问题——判定时请用 `git stash` 前后对比，不要顺手改那行。
+> 上面五条命令就是 CI 的门槛（见「CI 与发布」），`clippy -D warnings` 的基线是干净的——出现告警即视为失败，别用 `-A` 绕过。
 
 ## 认证与数据口径
 
@@ -67,7 +67,20 @@ src-tauri/src/
 
 ## CI 与发布
 
-`.github/workflows/release.yml`：推送 `v*` 标签时在 `windows-latest` 构建 MSI 并发布 GitHub Release（应用依赖 DPAPI，仅 Windows 可构建）。Release Notes 取自 `CHANGELOG.md` 中同版本小节，**发布前须先补该小节**，缺失时回退为提交列表；`workflow_dispatch` 可手动验证构建链路。
+三个文件，检查命令只在 action 里写一份：
+
+| 文件 | 触发 | 做什么 |
+|---|---|---|
+| `.github/actions/verify/action.yml` | 被两个工作流调用 | `cargo fmt --check` → `clippy -D warnings` → `cargo test` → `node --check dist/app.js` → `node tests/frontend-navigation.test.js` |
+| `.github/workflows/test.yml` | push 到 master、PR、手动 | 在 `windows-latest` 跑上面那份检查；`paths-ignore` 跳过纯文档与纯 `harmony/` 改动；同分支旧任务自动取消 |
+| `.github/workflows/release.yml` | 推送 `v*` 标签、手动 | 先跑同一份检查，再 `cargo tauri build` 出 MSI 并发布 GitHub Release |
+
+- 两个工作流都只能在 `windows-latest` 上跑：应用依赖 DPAPI / `windows-sys`，非 Windows 构建下 `crypto.rs` 的加解密一律返回 `Err`，跑不到真实路径。私有仓库的 Windows 分钟数按 2 倍计费，这是 `paths-ignore` 与 `concurrency` 存在的原因。
+- 发布门槛：标签号必须与 `src-tauri/tauri.conf.json` 的 `version` 一致，否则工作流直接失败（MSI 文件名会与 Release 标题对不上）；`Cargo.toml` 的 `version` 只用于 crate，不参与校验。
+- Release Notes 取自 `CHANGELOG.md` 中同版本小节，**发布前须先补该小节**；缺失只告警并回退为上一标签以来的提交列表（该回退依赖 `fetch-depth: 0`）。
+- `workflow_dispatch` 手动跑发布工作流只验证构建链路，不创建 Release，MSI 改为上传为 artifact。
+- `tauri-cli` 版本固定在 `release.yml` 的 `TAURI_CLI_VERSION`，并据此缓存 `~/.cargo/bin/cargo-tauri.exe`；升级 CLI 时版本与缓存键要一起改，否则缓存会命中旧二进制。
+- **HarmonyOS 端不在 CI 内**：hvigor / DevEco 工具链装不上 GitHub 托管 runner。改动 `harmony/` 后请本地跑 `hvigorw test -p testType=LocalTest` 与 `devecocli build`（见 [`harmony/README.md`](harmony/README.md)）。
 
 ## 第三方资源
 

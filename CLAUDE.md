@@ -35,6 +35,8 @@ node tests/frontend-navigation.test.js
 cargo tauri build
 ```
 
+上面这些命令就是 CI 的门槛：`.github/actions/verify/action.yml` 是唯一的检查命令列表，`test.yml`（push master / PR）与 `release.yml`（`v*` 标签）都调用它，只在 `windows-latest` 上跑（非 Windows 构建下 `crypto.rs` 的加解密一律返回 `Err`，跑不到真实路径）。要增删检查项只改那个 action，不要在两个 workflow 里各写一份。HarmonyOS 端不在 CI 内（hvigor / DevEco 装不上托管 runner），改 `harmony/` 后须本地跑 `hvigorw test -p testType=LocalTest` 与 `devecocli build`。
+
 涉及窗口、托盘、前端交互或数据展示时，必须运行 `cargo tauri dev` 验证真实 WebView2 应用。若已有 `amax.exe` 运行，先让人工关闭，不要终止未知进程，也不要用 `cargo check` 代替运行验证。
 
 ## 架构
