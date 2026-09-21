@@ -14,7 +14,8 @@
 | 降级显示 | 官网聚合接口失败时趋势与汇总回退本地快照估算并标注；模型分布仅官方数据可得时显示 |
 | 数据导出 | 桌面端 CSV / JSON / XLSX；手机端 CSV / JSON（字段口径与桌面端一致） |
 | 官网登录取凭据 | 应用内 WebView 打开官网登录页，自动提取整串 Session Cookie（含 HTTP-only），手动粘贴保留为兜底 |
-| 托盘与后台刷新 | 关闭/最小化即隐藏到托盘；每 10 分钟后台刷新；托盘菜单可刷新/恢复窗口/退出 |
+| 托盘与后台刷新 | 关闭/最小化即隐藏到托盘；每 10 分钟后台刷新；托盘菜单可刷新/恢复窗口/检查更新/退出 |
+| 自动更新 | 启动 15 秒后首查、之后每 24 小时一查，发现新版本立即下载验签；主窗口隐藏/最小化或连续 90 秒无操作且后台刷新不在飞行中时才安装并重启，设置页可手动检查或「现在重启并安装」 |
 | 低余额通知 | 剩余额度低于 10% 时发一次系统通知（后台/托盘刷新触发），恢复到阈值以上后重置 |
 | 失效引导 | 凭据失效时回到配置页并直接指向登录入口；桌面端后台刷新撞上失效会主动广播引导重登 |
 
@@ -53,7 +54,7 @@ node tests/frontend-navigation.test.js      # 前端逻辑回归（node:test + v
 ```
 dist/            静态前端（index.html / style.css / app.js + vendor/）
 src-tauri/src/
-  lib.rs         应用编排：command 注册、共享状态、托盘、定时刷新、快照落库
+  lib.rs         应用编排：command 注册、共享状态、托盘、定时刷新、自动更新下载/空闲安装、快照落库
   api.rs         HTTP 聚合：两个官网接口 + 状态码分级（status_error）
   db.rs          SQLite：config / dashboard_snapshot
   crypto.rs      Windows DPAPI 加解密
@@ -61,7 +62,9 @@ src-tauri/src/
   login.rs       官网 WebView 登录窗与 Cookie 提取
 ```
 
-前端通过 `window.__TAURI__` 调用六个 IPC command（`get_config` / `save_config` / `fetch_dashboard` / `get_local_stats` / `fetch_usage_stats` / `open_login_window`），后端经 `dashboard-updated`、`login://success|cancelled|timeout`、`auth://expired` 事件回推。CSP 的 `connect-src` 只允许 Tauri IPC，HTTP 请求一律由 Rust 侧 reqwest 发起，前端不直连官网。
+前端通过 `window.__TAURI__` 调用十个 IPC command（`get_config` / `save_config` / `fetch_dashboard` / `get_local_stats` / `fetch_usage_stats` / `open_login_window` / `get_app_version` / `report_user_activity` / `check_for_updates_now` / `apply_update_now`），后端经 `dashboard-updated`、`login://success|cancelled|timeout`、`auth://expired`、`update://status` 事件回推。CSP 的 `connect-src` 只允许 Tauri IPC，HTTP 请求一律由 Rust 侧 reqwest 发起，前端不直连官网。
+
+自动更新的"什么时候装"由 Rust 侧单点判定：`report_user_activity` 只是前端活动的心跳（节流 5 秒），空闲阈值 90 秒这个常量只存在于 `lib.rs`，就绪文案随 `update://status` 一起下发，前端不复制一份。`update()` 在 Windows 上拉起 msiexec 后立即 `exit(0)`，所以下载与安装必须分成两段——先备好包再等时机，而不是检测到就装。
 
 所有 command 的错误统一序列化为 `{ code, message }`，`code ∈ auth | network | data | input | storage`，前端按 `code` 分支而非匹配文案。
 
@@ -79,6 +82,8 @@ src-tauri/src/
 - 发布门槛：标签号必须与 `src-tauri/tauri.conf.json` 的 `version` 一致，否则工作流直接失败（MSI 文件名会与 Release 标题对不上）；`Cargo.toml` 的 `version` 只用于 crate，不参与校验。
 - Release Notes 取自 `CHANGELOG.md` 中同版本小节，**发布前须先补该小节**；缺失只告警并回退为上一标签以来的提交列表（该回退依赖 `fetch-depth: 0`）。
 - `workflow_dispatch` 手动跑发布工作流只验证构建链路，不创建 Release，MSI 改为上传为 artifact。
+- **自动更新通道由发布流程负责补齐**：`tauri.conf.json` 需 `"bundle": { "createUpdaterArtifacts": true }`（否则不产 `.sig`）；`latest.json` 由 `release.yml` 的「Generate updater manifest」步骤手写生成（`cargo tauri build` 从不产出清单，只有 `tauri-action` 会），清单里固定取 `AMAX.Dashboard_<版本>_x64_zh-CN.msi` 作为 windows-x86_64 的更新包。标签构建在缺 `TAURI_SIGNING_PRIVATE_KEY`、缺 `.sig`、或 `.sig` 的密钥 id 与 `plugins.updater.pubkey` 不一致时一律失败，不再静默发一个更新坏掉的版本。
+- `plugins.updater.pubkey` 必须是 **base64(minisign `.pub` 文本块)**，不是裸 32 字节公钥——`tauri-cli` 解析不了后者，表现为构建期 "failed to decode pubkey"。换密钥要成对换：`cargo tauri signer generate` 出来的私钥进仓库 secret，公钥文件内容 base64 后填进配置。
 - `tauri-cli` 版本固定在 `release.yml` 的 `TAURI_CLI_VERSION`，并据此缓存 `~/.cargo/bin/cargo-tauri.exe`；升级 CLI 时版本与缓存键要一起改，否则缓存会命中旧二进制。
 - **HarmonyOS 端不在 CI 内**：hvigor / DevEco 工具链装不上 GitHub 托管 runner。改动 `harmony/` 后请本地跑 `hvigorw test -p testType=LocalTest` 与 `devecocli build`（见 [`harmony/README.md`](harmony/README.md)）。
 

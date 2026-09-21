@@ -43,7 +43,7 @@ cargo tauri build
 
 ### 前后端边界
 
-`dist/index.html`、`dist/style.css`、`dist/app.js` 构成完整前端。`src-tauri/tauri.conf.json` 的 `frontendDist` 指向 `../dist`，静态文件无需打包即可被 Tauri 加载。前端通过 `window.__TAURI__` 调用六个 IPC command：
+`dist/index.html`、`dist/style.css`、`dist/app.js` 构成完整前端。`src-tauri/tauri.conf.json` 的 `frontendDist` 指向 `../dist`，静态文件无需打包即可被 Tauri 加载。前端通过 `window.__TAURI__` 调用十个 IPC command：
 
 - `get_config`：返回 `{ has_cookie, has_api_key, cookie_expires_at }`。
 - `save_config`：保存 Cookie、可选 API Key 与官网下发的 `expires_at`（`Option<String>`，`null` 表示清掉旧值）。
@@ -51,8 +51,12 @@ cargo tauri build
 - `get_local_stats`：按起止日期查询每日快照（日末条），返回余额、本地估算值与每日新增请求数（累计差分）。
 - `fetch_usage_stats`：按起止日期调用官网聚合，返回补零后的每日消耗、模型分布与区间汇总。
 - `open_login_window`：打开官网 WebView 登录窗口，登录成功后自动提取 Cookie（见 `login.rs`）。
+- `get_app_version`：返回 `Cargo`/`tauri.conf.json` 的当前版本号，设置页「更新」区显示。
+- `report_user_activity`：前端活动心跳（`pointerdown`/`keydown`/`wheel`，节流 5 秒），只更新 `last_user_active`，返回值无意义，失败静默。
+- `check_for_updates_now`：手动检查更新（设置页按钮），结果只经 `update://status` 事件回推。
+- `apply_update_now`：立即安装已就绪的更新；没有暂存包时返回 `input` 类错误。成功时**不会返回**——安装会结束进程。
 
-后端通过 `dashboard-updated` 事件推送后台刷新结果，通过 `login://success` / `login://cancelled` / `login://timeout` 推送官网登录窗结果，通过 `auth://expired`（空载荷）广播后台或启动刷新撞上的凭据失效。新增或重命名 command/event 时，需要同步修改 `src-tauri/src/lib.rs` 和 `dist/app.js`。
+后端通过 `dashboard-updated` 事件推送后台刷新结果，通过 `login://success` / `login://cancelled` / `login://timeout` 推送官网登录窗结果，通过 `auth://expired`（空载荷）广播后台或启动刷新撞上的凭据失效，通过 `update://status`（`{ state, version, message }`，`state ∈ disabled | checking | up_to_date | downloading | staged | installing | error`）推送更新流程各阶段。新增或重命名 command/event 时，需要同步修改 `src-tauri/src/lib.rs` 和 `dist/app.js`。
 
 所有 command 的错误统一为 `src-tauri/src/error.rs::AppError`，序列化为 `{ code, message }` 作为 `invoke()` 的 reject 载荷；`code` 取值 `auth` / `network` / `data` / `input` / `storage`，语义分别是"凭据问题（重试无用，必须重登）/ 暂时不可用（可重试）/ 接口契约异常 / 入参非法 / 本机故障"。前端 `getErrorCode()` 按 `code` 分支，**禁止再退回文案子串匹配**（`includes('认证失败')`、`includes('401')`）；HTTP 状态分级只允许走 `api.rs::status_error(status, api)` 这一个入口，否则 401 与 5xx 会混成一类。
 
@@ -66,7 +70,7 @@ cargo tauri build
 - 每 10 分钟后台刷新，失败后 60s 起快速重试（封顶 5 分钟，成功复位）；剩余额度低于 10% 时发送一次系统通知。
 - 单实例：二次启动唤醒已有实例窗口，不重复创建托盘与定时器。
 - 日志统一走 tauri-plugin-log（stdout + 应用日志目录 amax.log，5MB 轮转），不用 eprintln!。
-- 自动更新：启动 15 秒后 + 托盘「检查更新」菜单触发，从 GitHub Releases 拉 latest.json，发现新版本下载安装并调用 `app.restart()` 重启（debug 构建跳过）；发布产物须带 .sig 与 latest.json。
+- 自动更新（详见下节）：启动 15 秒后首查、之后每 24 小时一查，托盘「检查更新」与设置页按钮可手动触发；发现新版本立即下载验签并暂存，等应用空闲才安装（debug 构建跳过检查）。
 - 保存刷新快照并同步托盘 tooltip。
 
 `src-tauri/src/api.rs` 负责 HTTP 聚合：
@@ -82,6 +86,18 @@ cargo tauri build
 `src-tauri/src/crypto.rs` 使用 Windows DPAPI 将 Cookie/API Key 绑定当前用户和机器，加密结果以 `dpapi:v1:<hex>` 存入 SQLite。`Db::get_cookie` / `get_api_key` 仍兼容旧明文记录；调整持久化格式时必须保留迁移路径。非 Windows 构建不提供不安全的明文加密降级。
 
 `src-tauri/src/login.rs` 实现官网 WebView 登录获取 Cookie（对齐手机端 LoginPage）：`open_login_window`（async command，与 Tauri 内置 `create_webview_window` 同形态）创建 `login` 标签的官网登录窗，已存在则仅聚焦（幂等），初始隐藏、页面加载完成后显示。登录判定为单通道：spawned 轮询任务每 800ms 调 `cookies_for_url`（可读 HTTP-only Cookie），session 出现即成功，口径同手机端 `parseSessionCookie`。手机端另有「URL 跳转 /dashboard」快路径，桌面端**不实现**——Tauri 文档明确 `cookies_for_url` 在 Windows 上于同步 command 或事件处理器中调用会死锁（wry#583），只能在 async command/独立线程读取。到期时间由 `session_expires_at` 提取（wry 把 `IsSession==true` 或 `Expires==-1.0` 映射为 `Expiration::Session`；`Expires==0.0` 会解出 1970 年），**仅晚于当前时刻的时间戳才算真实到期**，随 `login://success` 一起 emit `{ cookie, expires_at }`。共享 `settled` 原子标志防重入并终止轮询；用户关窗广播 `login://cancelled`，约 10 分钟未完成广播 `login://timeout`。登录窗不在 `capabilities/default.json` 的 `windows: ["main"]` 内，官网页面因此不具备任何 IPC 权限。
+
+### 自动更新（桌面端）
+
+`lib.rs` 的更新流程刻意分成"下载"和"安装"两段，中间用 `AppState::pending_update: Mutex<Option<StagedUpdate>>` 传递，原因在插件实现本身：updater 的 `Update::install()` 在 Windows 上走 `ShellExecuteW` 拉起 `msiexec /i … AUTOLAUNCHAPP=True` 后立刻 `std::process::exit(0)`，**一旦调用就是杀进程**，不存在"边用边装"。所以 `check_for_updates()` 只做 `check()` + `download()`（`download()` 内部完成 minisign 验签，返回的字节即已验签的包），把 `{ update, bytes }` 暂存；`start_update_installer()` 每 `IDLE_INSTALL_POLL`（5 秒）轮询一次，`update_install_is_idle()` 判定时机——主窗口隐藏或最小化即视为无人看管，窗口可见则要求前端至少 `IDLE_AFTER`（90 秒）没上报过活动，另外用 `refresh_lock.try_lock()` 探测后台刷新是否在飞。`take_staged_update()` 用 `Option::take()` 保证单次消费。
+
+要点约束：
+
+- 阈值与文案只在 Rust 侧定义，`staged` 状态文案随 `update://status` 下发，前端不得复制 `90` 这类常量（改阈值只动 `IDLE_AFTER`）。
+- `check_for_updates()` 用 `update_check_lock.try_lock()` 单飞，并发触发（定时/托盘/设置页）时后来者直接返回；已有暂存包时只重发 `staged` 状态，不重复拉包。
+- debug 构建（`cfg!(debug_assertions)`）跳过检查——本地 `cargo tauri dev` 没有签名产物，报"已是最新"以外的一切结论都是噪声；表现给用户的是 `disabled` 状态加一句"开发构建不检查更新"。
+- 检查结论一律有反馈：`emit_update_status()` 推事件，托盘/手动入口再补一条系统通知，失败路径走 `update_failed()`（日志 + `error` 状态 + 通知），不得静默。
+- **发布侧的更新通道是 CI 契约**：`bundle.createUpdaterArtifacts` 必须为 `true`（否则不产 `.sig`），`latest.json` 由 `release.yml`「Generate updater manifest」步骤生成（`cargo tauri build` 不产出清单），固定取 `AMAX.Dashboard_<版本>_x64_zh-CN.msi` 作为 `windows-x86_64` 的更新包。`plugins.updater.pubkey` 必须是 base64(minisign `.pub` 文本块)——裸 32 字节公钥会让 `tauri-cli` 在打包期就报 "failed to decode pubkey"，且客户端 `verify_signature` 永远不可能通过。
 
 ### 配置与权限
 
@@ -107,6 +123,7 @@ cargo tauri build
 | Cookie 属性可见性 | `cookies_for_url` 返回结构化 `Cookie`，可读 `expires_datetime()` | `fetchCookieSync` 只给 `name=value` 串，属性须走 `fetchAllCookies(false)`（@since 23，返回 `expiresDate` 字符串 + `isSessionCookie`，无 URL 过滤、无 `maxAge`） | 两套 WebView API 不同；`expiresDate` 官方仅称“时间格式详见 Date”，实测可能是 RFC-7601 串或 epoch，缺 `Expires` 时回 `-1`，故 `Format.ets::parseCookieExpiry` 必须多形态容错、拿不到即返回 null |
 | 加密后端 | Windows DPAPI（`dpapi:v1:`） | HUKS AES-256-GCM（`huks:v1:`） | 平台原生密钥库；两者产物不可互迁，故无跨设备同步 |
 | 定时刷新 | 每 10 分钟本地定时器 | WorkScheduler 延迟任务（最小间隔 2 小时起、非精确周期、回调上限 2 分钟） | 系统对后台任务的调度管控，无法复刻桌面节奏 |
+| 更新通道 | GitHub Release + tauri-plugin-updater 应用内自更新（MSI 验签后空闲安装） | 无应用内更新，随应用市场/侧载分发 | 手机端上架渠道要求安装包经市场签名，应用内替换 hqf/hap 不在受支持路径内；不要为"两端对齐"给手机端加自更新 |
 | 失效引导载体 | `auth://expired` 事件 + `focusRelogin()` | `AppStorage` 键 `authNotice`（看门狗/看板/统计页三处生产者，`ConfigPage.onPageShow` 消费后清空） | ArkUI 无跨页事件总线，`AppStorage` 是等价的单通道 |
 
 统计页经看板顶栏图表按钮进入：区间选择器（预设 7/14/30 天 + 自定义起止日期，跨度上限 1096 天）驱动 `fetch_usage_stats`（官方主源）与 `get_local_stats`（余额、请求数、对比与降级数据）并行调用；官方失败时趋势与汇总回退本地估算并标注，模型分布仅官方可用；消耗趋势图可叠加本地对比数据集（默认隐藏）；导出按钮将当前区间数据输出为 CSV / JSON / XLSX。Chart.js 与 SheetJS 以 UMD 单文件存放于 `dist/vendor/`，由 `app.js` 在进入统计页 / 首次 XLSX 导出时按需注入（`ensureChartLib` / `ensureXlsxLib`），不要改回 index.html 同步加载。统计页 `loadStats` 用 `statsLoadSeq` 序号丢弃过期响应（快速切换区间时防止旧数据覆盖新区间），改加载逻辑时不要删掉该保护。
