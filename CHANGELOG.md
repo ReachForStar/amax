@@ -32,7 +32,8 @@
 
 ### 修复
 
-- 修复 0.2.2 的自动更新从未生效（三处同时缺失，任一处都足以让更新通道不可用）：`tauri.conf.json` 没有 `bundle.createUpdaterArtifacts`，打包根本不产 `.sig`；Release 工作流从未生成 `latest.json`，客户端请求的 `releases/latest/download/latest.json` 一直 404；配置的 `pubkey` 是 32 字节裸密钥而非 minisign `.pub` 文本块的 base64，`tauri-cli` 无法解析、签名校验也不可能通过。现已补齐前两项并把第三项做成发布硬门槛——**公钥本身仍需换成与 `TAURI_SIGNING_PRIVATE_KEY` 配对的 minisign 公钥文本，否则标签构建会在打包阶段失败**
+- 修复 0.2.2 的自动更新从未生效（三处同时缺失，任一处都足以让更新通道不可用）：`tauri.conf.json` 没有 `bundle.createUpdaterArtifacts`，打包根本不产 `.sig`；Release 工作流从未生成 `latest.json`，客户端请求的 `releases/latest/download/latest.json` 一直 404；配置的 `pubkey` 是 32 字节裸 Ed25519 公钥而非 minisign `.pub` 文本块的 base64，`tauri-cli` 无法解析、签名校验也不可能通过（v0.2.2 的 Release 资产确实只有两个 MSI，没有任何 `.sig`/清单）。本次三处一并修掉，并新签了一对更新密钥：配置里的 `pubkey` 取自新生成密钥对的 `.pub` 文件内容，私钥留在本机 `.tauri/`（gitignored）
+  - **依赖动作**：把 `.tauri/amax.key` 的内容配到 GitHub 仓库 secret `TAURI_SIGNING_PRIVATE_KEY`，否则标签构建按新加的门槛直接失败（不再有可用产物，宁可不发）
 - 修复检查更新全程静默：无论“已是最新”“下载失败”还是“无新增版本”，原实现只写日志，用户点托盘「检查更新」后没有任何反馈。现在检查结论经 `update://status` 事件驱动设置页状态行，并以系统通知兜底（应用藏在托盘时看得到）
 - 修复统计页 Cookie 失效被静默降级：`/v1/logs/token-usage/by-model` 返回 401/403 时原实现被包成“用量查询失败: …”，不带认证语义，导致统计页只在本地估算上标注一句而不引导重登；现按状态码统一分级为认证错误
 - 修复 429 与 5xx 被当成认证错误：原桌面端把所有非 2xx 都冠以“认证失败”，服务端限流或故障会把用户无端踢回配置页；现 `429`/`5xx` 归为可重试的网络错误
