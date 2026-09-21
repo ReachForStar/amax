@@ -101,13 +101,23 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $version = "${{ github.ref_name }}" -replace '^v', ''
           $conf = Get-Content src-tauri/tauri.conf.json -Raw -Encoding utf8 | ConvertFrom-Json
-          # 清单每个平台只能给一个包，双语 MSI 固定以 zh-CN 作为更新通道
-          $msiName = "AMAX.Dashboard_${version}_x64_zh-CN.msi"
-          $msi = "target/release/bundle/msi/$msiName"
-          $sig = "$msi.sig"
-          if (-not (Test-Path $msi)) { Write-Output "::error::缺少 $msi，无法生成更新清单"; exit 1 }
+          # 清单每个平台只能给一个包，双语 MSI 固定取 zh-CN 作为更新通道。
+          # 名字必须是"从目录里拿"而不是拼字符串：tauri-bundler 用
+          # `product_name`_版本_架构_语言 直接命名（productName "AMAX Dashboard" 含空格），
+          # 而不同 tauri-cli 对空格的清洗规则不同——0.2.2 的产物叫 AMAX.Dashboard_*，
+          # 2.11.5 实测叫 "AMAX Dashboard_*"。拼死任一形式都会在版本升级时静默取不到文件。
+          $msiFiles = @(Get-ChildItem "target/release/bundle/msi" -Filter '*_x64_zh-CN.msi' -File)
+          if ($msiFiles.Count -ne 1) {
+            Write-Output "::error::期望恰好 1 个 zh-CN MSI，实际 $($msiFiles.Count) 个：$($msiFiles.Name -join ', ')"
+            exit 1
+          }
+          $msi = $msiFiles[0]
+          $msiName = $msi.Name
+          # 资产名含空格时必须按路径段转义（GitHub 下载链接走 %20），否则清单里的 url 不是合法 URI
+          $msiUrlName = [Uri]::EscapeDataString($msiName)
+          $sig = "$($msi.FullName).sig"
           if (-not (Test-Path $sig)) {
-            Write-Output "::error::缺少 $sig：本次构建未签名（私钥缺失或无效），发布后客户端自动更新必然失败"
+            Write-Output "::error::缺少 $msiName.sig：本次构建未签名（私钥缺失或无效），发布后客户端自动更新必然失败"
             exit 1
           }
           # pubkey 与 .sig 都是「base64(minisign 文本块)」，第 2 行的第 3~10 字节是密钥 id。
@@ -133,8 +143,8 @@ jobs:
             pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
             platforms = [ordered]@{
               'windows-x86_64' = [ordered]@{
+                url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$msiUrlName"
                 # .sig 内容已是签名文本块的 base64，清单原样引用
-                url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$msiName"
                 signature = (Get-Content $sig -Raw).Trim()
               }
             }
