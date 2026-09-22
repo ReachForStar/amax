@@ -1,12 +1,14 @@
 //! Tauri 命令模块 — IPC 桥接 + 托盘 + 通知 + 自动刷新
 
+mod alert;
 mod api;
 mod crypto;
 mod db;
+mod deliver;
 mod error;
 mod login;
 
-use chrono::{Local, NaiveDate};
+use chrono::{Days, Local, NaiveDate};
 use db::Db;
 use error::{AppError, poisoned};
 use std::sync::Mutex;
@@ -20,7 +22,11 @@ pub struct AppState {
     db: Mutex<Db>,
     client: reqwest::Client,
     refresh_lock: tokio::sync::Mutex<()>,
-    low_quota_notified: Mutex<bool>,
+    /// 告警引擎状态：`last_payload` 只在负载变化时推 `alert://status`，避免每 10 分钟重复推送
+    alert: Mutex<AlertState>,
+    /// 投递任务已起飞、结果还没写库的规则。看板刷新每 10 分钟一轮，而一封超时邮件可能要
+    /// 20 秒才回来——没有这把占位锁，同一告警会在结果落地前被下一轮重复投递
+    alerts_in_flight: Mutex<std::collections::HashSet<&'static str>>,
     /// 最近一次成功刷新时刻，用于启动任务去重（窗口可见时前端已触发刷新）
     last_successful_refresh: Mutex<Option<std::time::Instant>>,
     /// 最近一次刷新得到的 user_id，供看板请求并行（缓存失效时自动回退重查）
@@ -41,6 +47,14 @@ pub struct AppState {
 struct StagedUpdate {
     update: tauri_plugin_updater::Update,
     bytes: Vec<u8>,
+}
+
+/// 告警引擎的进程内可观测状态，仅用于给设置页展示「今天还剩几次额度」。
+/// 去重本身靠 `alert_state` 表，不依赖这里，所以重启不会导致重复告警。
+#[derive(Debug, Default)]
+struct AlertState {
+    /// 最近一次推给 `alert://status` 的负载，用于只在内容变化时推送
+    last_payload: Option<serde_json::Value>,
 }
 
 /// 校验统计区间：格式、先后、不超今天、跨度上限 1096 天
@@ -179,6 +193,123 @@ fn get_app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// 告警参数 + 启用规则 + 可调区间 + 当日进度，设置页据此渲染
+#[tauri::command]
+fn get_alert_settings(state: tauri::State<AppState>) -> Result<serde_json::Value, AppError> {
+    let day = Local::now().date_naive().format("%Y-%m-%d").to_string();
+    let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
+    // 读失败时 load_* 内部已按默认值降级并记日志，这里不额外报错：设置页要能打开
+    let settings = alert::load_settings(&db);
+    Ok(serde_json::json!({
+        "settings": settings,
+        "rulesEnabled": alert::load_rules_enabled(&db),
+        "paramRanges": alert::param_ranges(),
+        "status": alert_status(&db, &settings, &day),
+    }))
+}
+
+/// 当日告警进度；账本读不到时返回 null，让前端宁可留白也不拿 0 假装「今天还没投过」
+fn alert_status(db: &Db, settings: &alert::AlertSettings, day: &str) -> Option<serde_json::Value> {
+    match alert_day_state(db, day) {
+        Ok(day_state) => Some(alert_state_payload(settings, day, day_state.total)),
+        Err(error) => {
+            log::warn!("读取当日告警次数失败，设置页不显示进度: {error}");
+            None
+        }
+    }
+}
+
+/// 保存告警参数与启用规则，回读一次真实落库的值（夹取结果以库里为准）
+#[tauri::command]
+fn set_alert_settings(
+    state: tauri::State<AppState>,
+    settings: alert::AlertSettings,
+    rules_enabled: Option<Vec<String>>,
+) -> Result<serde_json::Value, AppError> {
+    let day = Local::now().date_naive().format("%Y-%m-%d").to_string();
+    let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
+    let rules = alert::resolve_rules_enabled(&alert::load_rules_enabled(&db), rules_enabled)?;
+    let saved = db.set_alert_settings(settings)?;
+    db.set_alert_rules_enabled(&rules, &alert::rule_keys())?;
+    Ok(serde_json::json!({
+        "settings": saved,
+        "rulesEnabled": rules,
+        "status": alert_status(&db, &saved, &day),
+    }))
+}
+
+/// 「发一条测试」时写投递账本用的 rule_key。真实规则的 key 只有 `alert::Rule` 那三个，
+/// 用 `test` 既不会命中去重查询，也不会消耗当日额度。
+const TEST_DELIVERY_RULE_KEY: &str = "test";
+
+/// 通知渠道配置 + 当日投递明细。只有 SMTP 授权码不回显原值，昵称按明文配置回显。
+#[tauri::command]
+fn get_alert_channels(state: tauri::State<AppState>) -> Result<serde_json::Value, AppError> {
+    let day = Local::now().date_naive().format("%Y-%m-%d").to_string();
+    let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
+    let config = db.get_delivery_config()?;
+    Ok(serde_json::json!({
+        "channels": deliver::view(&config),
+        "deliveries": db.recent_alert_deliveries(&day, 20)?,
+    }))
+}
+
+/// 保存渠道设置。校验用「已存配置 + 本次提交」合并后的口径：凭据可以只填一次，
+/// 不必每次重新提交；但开着渠道就一定得有能发出去的料。
+#[tauri::command]
+fn set_alert_channels(
+    state: tauri::State<AppState>,
+    channels: deliver::ChannelInput,
+) -> Result<serde_json::Value, AppError> {
+    let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
+    channels.validate(&db.get_delivery_config()?)?;
+    db.set_delivery_channels(&channels)?;
+    Ok(deliver::view(&db.get_delivery_config()?))
+}
+
+/// 按指定渠道发一条测试消息：验证凭据与网络可用，只记账不占用当日告警额度。
+#[tauri::command]
+async fn test_alert_channel(
+    app: tauri::AppHandle,
+    channel: String,
+) -> Result<serde_json::Value, AppError> {
+    let channel = deliver::Channel::from_key(&channel)
+        .ok_or_else(|| AppError::input("未知渠道，只能是 notification / meow / mail"))?;
+    let config = {
+        let state = app.state::<AppState>();
+        let db = state.db.lock().map_err(|_| poisoned("数据库"))?;
+        db.get_delivery_config()?
+    };
+    if config.availability(channel) != deliver::Availability::Ready {
+        return Err(AppError::input(
+            config
+                .notice(channel)
+                .unwrap_or_else(|| "该渠道未开启或配置不完整".to_string()),
+        ));
+    }
+    let title = "AMAX 测试告警";
+    let body = format!(
+        "这是一条来自 AMAX Dashboard 的测试消息（{}渠道），用于确认凭据与网络可用。",
+        channel.label()
+    );
+    let receipt = send_to_channel(&app, channel, title, &body, &config)
+        .await
+        .ok_or_else(|| AppError::input("该渠道缺少可用凭据，请重新填写"))?;
+    let day = Local::now().date_naive().format("%Y-%m-%d").to_string();
+    record_alert_attempt(
+        &app,
+        &day,
+        TEST_DELIVERY_RULE_KEY,
+        std::slice::from_ref(&receipt),
+        false,
+    );
+    Ok(serde_json::json!({
+        "ok": receipt.outcome.is_success(),
+        "channel": channel.key(),
+        "error": receipt.error,
+    }))
+}
+
 /// 前端按节流上报用户活动（见 dist/app.js 的 pingUserActivity）
 #[tauri::command]
 fn report_user_activity(state: tauri::State<AppState>) {
@@ -231,9 +362,11 @@ fn update_tray_tooltip(app: &tauri::AppHandle, data: &api::DashboardData) {
     }
 }
 
+/// 拉取看板 → 落快照 → 同步托盘/前端 → （可选）评估告警。
+/// 两个开关独立：手动刷新要推前端但不评估告警，后台刷新两者都要。
 async fn refresh_dashboard(
     app: &tauri::AppHandle,
-    notify_low_quota: bool,
+    alerts_enabled: bool,
     emit_update: bool,
 ) -> Result<api::DashboardData, AppError> {
     let state = app.state::<AppState>();
@@ -267,31 +400,9 @@ async fn refresh_dashboard(
             .map_err(|error| AppError::storage(format!("推送看板更新失败: {error}")))?;
     }
 
-    let should_notify = {
-        let mut notified = state
-            .low_quota_notified
-            .lock()
-            .map_err(|_| poisoned("通知状态锁"))?;
-        if data.percent >= 10.0 {
-            *notified = false;
-            false
-        } else if notify_low_quota && !*notified {
-            *notified = true;
-            true
-        } else {
-            false
-        }
-    };
-    if should_notify {
-        app.notification()
-            .builder()
-            .title("⚠️ AMAX 额度不足")
-            .body(format!(
-                "剩余 ¥{:.2} / ¥{:.2} ({:.1}%), 请及时充值",
-                data.remaining, data.total, data.percent
-            ))
-            .show()
-            .map_err(|error| AppError::storage(format!("发送额度通知失败: {error}")))?;
+    // 告警评估放在看板推送之后：投递失败不该让刷新变成失败，前端此刻已经拿到新数据了
+    if alerts_enabled {
+        run_alerts(app, &data);
     }
 
     if let Ok(mut last) = state.last_successful_refresh.lock() {
@@ -299,6 +410,327 @@ async fn refresh_dashboard(
     }
 
     Ok(data)
+}
+
+/// 当日已投次数。`day` 由调用方一次性给出（见 `run_alerts`），保证与基准用的是同一个日界
+fn alert_day_state(db: &Db, day: &str) -> Result<alert::DayState, AppError> {
+    let counts = db.get_alert_day_counts(day)?;
+    Ok(alert::DayState::from_counts(&counts))
+}
+
+/// 评估并投递告警。整条链路只写日志不抛错——看板刷新已经成功，不能因为通知发不出去而回报失败。
+///
+/// 投递放在独立任务里：系统通知是即时的，MeoW 是一次 HTTP，SMTP 最坏要等满 20 秒超时。
+/// 卡在刷新路径上会拖住 `refresh_lock`，让后面每一轮都排在一个坏掉的邮件服务器后面。
+fn run_alerts(app: &tauri::AppHandle, data: &api::DashboardData) {
+    let state = app.state::<AppState>();
+    // 日界只在这里取一次：已投次数与用量基准都基于同一个 day，
+    // 分两次取时间会让跨午夜的那一轮读到「新的一天 + 旧的一天的次数」而重复投递
+    let day = Local::now().date_naive().format("%Y-%m-%d").to_string();
+    let evaluated = {
+        let Ok(db) = state.db.lock() else {
+            log::error!("读取告警状态时数据库锁不可用，跳过本轮告警");
+            return;
+        };
+        let settings = alert::load_settings(&db);
+        let rules = alert::load_rules_enabled(&db);
+        match (
+            alert_day_state(&db, &day),
+            alert_baseline(&db, &day),
+            db.get_delivery_config(),
+        ) {
+            (Ok(day_state), Ok(baseline), Ok(config)) => {
+                Some((settings, rules, day_state, baseline, config))
+            }
+            _ => {
+                // 基准或状态读不出来时宁可不报：误报一次比漏报一次的代价更高
+                log::error!("读取告警基准/当日状态/渠道配置失败，跳过本轮告警");
+                None
+            }
+        }
+    };
+    let Some((settings, rules, day_state, baseline, config)) = evaluated else {
+        return;
+    };
+
+    let current = alert::Current {
+        percent: data.percent,
+        remaining: data.remaining,
+        total: data.total,
+        today_yuan: data.today_yuan,
+    };
+    let findings = alert::detect(&current, &baseline, &settings, &rules, &day_state);
+    let usable = config.usable();
+    if findings.is_empty() || usable.is_empty() {
+        if !findings.is_empty() {
+            // 一条渠道都没开时不消耗额度：额度记的是「今日已投出几次」，没投出去就不算投过
+            log::warn!(
+                "检测到 {} 条告警但没有可用渠道，本轮跳过投递（设置页里开启系统通知或补全渠道凭据）",
+                findings.len()
+            );
+        }
+        emit_alert_status_from_db(app, &state, &settings, &day);
+        return;
+    }
+
+    let mut in_flight = 0usize;
+    for finding in findings {
+        let Ok(mut set) = state.alerts_in_flight.lock() else {
+            log::error!("告警投递占位锁不可用，跳过 {}", finding.rule);
+            continue;
+        };
+        // 上一轮的结果还没写库（例如邮件正在超时），这条告警就不重复起飞
+        if !set.insert(finding.rule) {
+            continue;
+        }
+        drop(set);
+        in_flight += 1;
+        let app = app.clone();
+        let day = day.clone();
+        let config = config.clone();
+        tauri::async_runtime::spawn(async move {
+            deliver_alert(app, day, settings, finding, config).await;
+        });
+    }
+    // 有任务起飞时本轮不推额度事件：次数还没写库，推出去的是旧值。
+    // 任务收尾会按库里的真实次数补一次，前端不会停在「今天还没投过」。
+    if in_flight == 0 {
+        emit_alert_status_from_db(app, &state, &settings, &day);
+    }
+}
+
+/// 投递任务运行期间占住规则 key；任务结束（含 panic 展开）时释放。
+/// 释放不了会让这条规则当天再也投不出去，只能等重启。
+struct AlertSlotReleaser {
+    app: tauri::AppHandle,
+    rule: &'static str,
+}
+
+impl Drop for AlertSlotReleaser {
+    fn drop(&mut self) {
+        let Some(state) = self.app.try_state::<AppState>() else {
+            return;
+        };
+        if let Ok(mut set) = state.alerts_in_flight.lock() {
+            set.remove(self.rule);
+        }
+    }
+}
+
+/// 把一条告警投给所有可用渠道并记账。
+///
+/// 额度消耗口径：任一渠道成功即算投过；全部永久失败也算投过（否则每 10 分钟撞一次同一堵墙）；
+/// 只有「还能重试」时不消耗，留给下一轮，并由 `deliver::MAX_FAILED_DELIVERIES_PER_RULE`
+/// 封顶——当日失败行数到达上限后直接消耗额度收口，不再无限重试。
+async fn deliver_alert(
+    app: tauri::AppHandle,
+    day: String,
+    settings: alert::AlertSettings,
+    finding: alert::Finding,
+    config: deliver::DeliveryConfig,
+) {
+    let _releaser = AlertSlotReleaser {
+        app: app.clone(),
+        rule: finding.rule,
+    };
+    let state = app.state::<AppState>();
+
+    let exhausted = {
+        let Ok(db) = state.db.lock() else {
+            log::error!("读取告警失败次数时数据库锁不可用，跳过 {}", finding.rule);
+            return;
+        };
+        match db.count_alert_failures(finding.rule, &day) {
+            Ok(failures) => failures >= deliver::MAX_FAILED_DELIVERIES_PER_RULE,
+            Err(error) => {
+                log::error!("读取告警失败次数失败: {error}");
+                false
+            }
+        }
+    };
+    if exhausted {
+        log::warn!(
+            "告警 {} 当日已累计 {} 条失败投递，今天不再重试",
+            finding.rule,
+            deliver::MAX_FAILED_DELIVERIES_PER_RULE
+        );
+        record_alert_attempt(&app, &day, finding.rule, &[], true);
+        emit_alert_status_from_db(&app, &state, &settings, &day);
+        return;
+    }
+
+    let mut receipts = Vec::new();
+    for channel in config.usable() {
+        if let Some(receipt) =
+            send_to_channel(&app, channel, &finding.title, &finding.message, &config).await
+        {
+            match receipt.outcome {
+                deliver::Outcome::Sent => {
+                    log::info!("告警 {} 已经 {} 投递", finding.rule, channel.label())
+                }
+                deliver::Outcome::Failed | deliver::Outcome::Retryable => log::warn!(
+                    "告警 {} 的 {} 投递失败: {}",
+                    finding.rule,
+                    channel.label(),
+                    receipt.error.as_deref().unwrap_or("未知原因")
+                ),
+            }
+            receipts.push(receipt);
+        }
+    }
+    let consume = deliver::summarize(&receipts) != deliver::Outcome::Retryable;
+    record_alert_attempt(&app, &day, finding.rule, &receipts, consume);
+    emit_alert_status_from_db(&app, &state, &settings, &day);
+}
+
+/// 单渠道投递。返回 `None` 表示该渠道缺凭据（`usable()` 已过滤，只有竞态时才会发生）。
+async fn send_to_channel(
+    app: &tauri::AppHandle,
+    channel: deliver::Channel,
+    title: &str,
+    body: &str,
+    config: &deliver::DeliveryConfig,
+) -> Option<deliver::Receipt> {
+    match channel {
+        deliver::Channel::Notification => Some(deliver::send_notification(app, title, body)),
+        deliver::Channel::Meow => {
+            let nickname = config.meow_nickname.clone()?;
+            let client = &app.state::<AppState>().client;
+            Some(deliver::send_meow(client, &nickname, title, body).await)
+        }
+        deliver::Channel::Mail => {
+            let target = config.mail_target()?;
+            let title = title.to_string();
+            let body = body.to_string();
+            // lettre 是同步阻塞的：放到阻塞线程池，别占住 async runtime 的工作线程
+            Some(
+                match tokio::task::spawn_blocking(move || {
+                    deliver::send_mail(&target, &title, &body)
+                })
+                .await
+                {
+                    Ok(receipt) => receipt,
+                    Err(error) => {
+                        deliver::Receipt::retryable(channel, format!("邮件投递任务异常: {error}"))
+                    }
+                },
+            )
+        }
+    }
+}
+
+/// 投递结果记账：明细按渠道逐行写，`consume` 决定是否消耗当日额度。
+/// 明细与去重账本同源，`alert_delivery` 因此是「实际投出了什么」的事实记录。
+fn record_alert_attempt(
+    app: &tauri::AppHandle,
+    day: &str,
+    rule: &'static str,
+    receipts: &[deliver::Receipt],
+    consume: bool,
+) {
+    let state = app.state::<AppState>();
+    let Ok(db) = state.db.lock() else {
+        log::error!("记录告警投递结果时数据库锁不可用");
+        return;
+    };
+    let now = Local::now().to_rfc3339();
+    for receipt in receipts {
+        let ok = receipt.outcome.is_success();
+        if let Err(error) = db.record_alert_delivery(
+            rule,
+            day,
+            receipt.channel.key(),
+            ok,
+            (!ok).then_some(receipt.error.as_deref()).flatten(),
+            &now,
+        ) {
+            log::error!("写入告警投递记录失败: {error}");
+        }
+    }
+    if consume && let Err(error) = db.record_alert_fire(rule, day, &now) {
+        log::error!("写入告警去重状态失败: {error}");
+    }
+}
+
+/// 以库为准推一次当日额度状态：投递任务可能刚消耗过额度，内存里推不出准确次数
+fn emit_alert_status_from_db(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    settings: &alert::AlertSettings,
+    day: &str,
+) {
+    let fired_today = {
+        let Ok(db) = state.db.lock() else {
+            log::warn!("读取当日告警次数时数据库锁不可用，跳过本轮状态事件");
+            return;
+        };
+        match alert_day_state(&db, day) {
+            Ok(day_state) => day_state.total,
+            Err(error) => {
+                log::warn!("读取当日告警次数失败，跳过本轮状态事件: {error}");
+                return;
+            }
+        }
+    };
+    emit_alert_state_event(app, state, settings, day, fired_today);
+}
+
+/// 用量基准：取窗口内的日末快照，排除当日与空缺日（口径见 `alert::build_baseline`）
+fn alert_baseline(db: &Db, day: &str) -> Result<alert::Baseline, AppError> {
+    let today = NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map_err(|_| AppError::storage(format!("当日日期格式异常: {day}")))?;
+    let start = today
+        .checked_sub_days(Days::new(alert::BASELINE_WINDOW_DAYS as u64))
+        .ok_or_else(|| AppError::storage("告警基准窗口超出可表示日期范围"))?
+        .format("%Y-%m-%d")
+        .to_string();
+    let snapshots = db.get_daily_snapshots(&start, day)?;
+    alert::build_baseline(&snapshots, day, alert::BASELINE_WINDOW_DAYS)
+}
+
+/// 当日告警额度事件的负载（三种状态字段一致，前端无需分支解析）
+fn alert_state_payload(
+    settings: &alert::AlertSettings,
+    day: &str,
+    fired_today: i64,
+) -> serde_json::Value {
+    let name = if !settings.enabled {
+        "disabled"
+    } else if fired_today >= settings.max_fires_per_day {
+        "cap_hit"
+    } else {
+        "armed"
+    };
+    serde_json::json!({
+        "state": name,
+        "day": day,
+        "firedToday": fired_today,
+        "cap": settings.max_fires_per_day,
+    })
+}
+
+/// 推送当日告警额度状态；只在内容与上次推出的一模一样时跳过，
+/// 这样「今天又多投一次」能推出去，而每 10 分钟一次的无变化刷新不会重复推。
+fn emit_alert_state_event(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    settings: &alert::AlertSettings,
+    day: &str,
+    fired_today: i64,
+) {
+    let payload = alert_state_payload(settings, day, fired_today);
+    let Ok(mut last) = state.alert.lock() else {
+        log::warn!("告警状态锁不可用，跳过本轮状态事件");
+        return;
+    };
+    if last.last_payload.as_ref() == Some(&payload) {
+        return;
+    }
+    last.last_payload = Some(payload.clone());
+    drop(last);
+    if let Err(error) = app.emit("alert://status", payload) {
+        log::warn!("推送告警状态失败: {error}");
+    }
 }
 
 fn build_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
@@ -562,7 +994,9 @@ fn start_update_installer(app: &tauri::AppHandle) {
     });
 }
 
-/// 后台刷新：成功与否返回给调用方，供自动刷新排程决定下次间隔
+/// 后台刷新：成功与否返回给调用方，供自动刷新排程决定下次间隔。
+/// 第二个参数是「本轮是否评估告警」：目前只有后台周期刷新传 true，
+/// 前端的 `fetch_dashboard` 与启动兜底刷新都不评估（沿用旧版低余额通知的触发范围）。
 async fn refresh_and_notify(app: &tauri::AppHandle) -> bool {
     match refresh_dashboard(app, true, true).await {
         Ok(_) => true,
@@ -657,7 +1091,8 @@ pub fn run() {
                 db: Mutex::new(db),
                 client,
                 refresh_lock: tokio::sync::Mutex::new(()),
-                low_quota_notified: Mutex::new(false),
+                alert: Mutex::new(AlertState::default()),
+                alerts_in_flight: Mutex::new(std::collections::HashSet::new()),
                 last_successful_refresh: Mutex::new(None),
                 user_id_cache: Mutex::new(None),
                 pending_update: Mutex::new(None),
@@ -736,6 +1171,11 @@ pub fn run() {
             fetch_usage_stats,
             login::open_login_window,
             get_app_version,
+            get_alert_settings,
+            set_alert_settings,
+            get_alert_channels,
+            set_alert_channels,
+            test_alert_channel,
             report_user_activity,
             check_for_updates_now,
             apply_update_now,
@@ -746,9 +1186,78 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use super::alert;
+    use super::alert_state_payload;
     use super::error::ErrorCode;
     use super::validate_date_range;
     use chrono::{Duration, Local};
+
+    fn settings() -> alert::AlertSettings {
+        alert::AlertSettings::default()
+    }
+
+    #[test]
+    fn alert_state_event_reports_disabled_but_keeps_counts() {
+        let disabled = alert::AlertSettings {
+            enabled: false,
+            ..settings()
+        };
+        let payload = alert_state_payload(&disabled, "2026-09-22", 5);
+        assert_eq!(payload["state"], "disabled");
+        assert_eq!(payload["firedToday"], 5, "关闭状态也如实报当日次数");
+    }
+
+    #[test]
+    fn alert_state_event_marks_cap_and_resets_with_new_day() {
+        // 默认上限 2 次
+        assert_eq!(
+            alert_state_payload(&settings(), "2026-09-22", 0)["state"],
+            "armed"
+        );
+        assert_eq!(
+            alert_state_payload(&settings(), "2026-09-22", 1)["state"],
+            "armed"
+        );
+        assert_eq!(
+            alert_state_payload(&settings(), "2026-09-22", 2)["state"],
+            "cap_hit"
+        );
+        assert_eq!(
+            alert_state_payload(&settings(), "2026-09-22", 3)["state"],
+            "cap_hit"
+        );
+
+        let next_day = alert_state_payload(&settings(), "2026-09-23", 0);
+        assert_eq!(next_day["state"], "armed", "次日次数归零后应重新可用");
+        assert_eq!(
+            next_day["day"], "2026-09-23",
+            "负载带 day，前端据此复位展示"
+        );
+    }
+
+    #[test]
+    fn alert_state_payload_fields_are_state_independent() {
+        // 三种状态的字段集合必须一致：前端按固定字段渲染，不需要按 state 分支取值
+        let variants = [
+            alert_state_payload(&settings(), "2026-09-22", 0),
+            alert_state_payload(&settings(), "2026-09-22", 9),
+            alert_state_payload(
+                &alert::AlertSettings {
+                    enabled: false,
+                    ..settings()
+                },
+                "2026-09-22",
+                0,
+            ),
+        ];
+        for payload in variants {
+            let object = payload.as_object().expect("负载应是对象");
+            // 排序后比较：不依赖 serde_json 的 Map 是否开了 preserve_order
+            let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["cap", "day", "firedToday", "state"]);
+        }
+    }
 
     fn today() -> chrono::NaiveDate {
         Local::now().date_naive()

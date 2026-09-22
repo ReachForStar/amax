@@ -4,6 +4,7 @@
 // （静态接口自 API 18 废弃，当前 targetSdk API 23；官方推荐 UIContext 实例）
 import { Theme } from '../common/Theme';
 import { GridBackground } from '../common/GridBackground';
+import { AlertPanel } from '../common/AlertPanel';
 import { ApiError, formatLocalDateTime } from '../common/Format';
 import { getCookie, getCookieExpiresAt, saveCookie, saveApiKey, clearCredentials } from '../model/Store';
 import { fetchDashboard } from '../model/Api';
@@ -199,6 +200,12 @@ struct ConfigPage {
               .fontSize(12).fontColor(this.statusIsError ? Theme.error : Theme.accent)
               .backgroundColor(this.statusIsError ? Theme.errorBg : Theme.accentSoft)
               .width('100%').padding(10).borderRadius(2)
+          }
+
+          // 告警区只在已有凭据时展开：本页首次使用时是「接入」引导，
+          // 调告警参数是登录之后的事
+          if (this.hasCookie) {
+            AlertPanel()
           }
         }
         .width('100%')

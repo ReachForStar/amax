@@ -1,6 +1,6 @@
 # AMAX Dashboard（HarmonyOS 版）
 
-AMAX Dashboard 的 HarmonyOS 6 原生适配（ArkTS / ArkUI，Stage 模型）。一期：配置页（应用内 WebView 登录 + 手动粘贴）、看板页、HUKS 凭据加密、断点自适应（phone / tablet / 2in1）。二期：统计页（区间选择 / 汇总 / 趋势 / 模型分布 / 降级）、CSV / JSON 导出、低余额通知、WorkScheduler 后台刷新。三期：凭据生命周期收口——登录页 10 分钟等待看门狗、配置页 `onPageShow` 状态重读、凭据有效期展示（只展示不拦截）、认证失败一键重登提示。
+AMAX Dashboard 的 HarmonyOS 6 原生适配（ArkTS / ArkUI，Stage 模型）。一期：配置页（应用内 WebView 登录 + 手动粘贴）、看板页、HUKS 凭据加密、断点自适应（phone / tablet / 2in1）。二期：统计页（区间选择 / 汇总 / 趋势 / 模型分布 / 降级）、CSV / JSON 导出、低余额通知、WorkScheduler 后台刷新。三期：凭据生命周期收口——登录页 10 分钟等待看门狗、配置页 `onPageShow` 状态重读、凭据有效期展示（只展示不拦截）、认证失败一键重登提示。四期：告警引擎对齐桌面端（Alert/Deliver/Alerts/AlertPanel，系统通知+MeoW，无 SMTP）。
 
 桌面端（仓库根）的功能与数据口径见 [`../README.md`](../README.md)，两端有意差异见 [`../CLAUDE.md`](../CLAUDE.md) 的"两端有意差异"表。
 
@@ -46,7 +46,7 @@ D:/command-line-tools/bin/hvigorw.bat test -p module=entry -p product=default -p
 
 - `entry/src/main/ets/pages/` — DashboardPage（看板：Token / 费用 / 余额，顶栏 📈 入口进统计页）/ StatsPage（统计：7/14/30 天预设 + 自定义起止区间、汇总卡、消耗趋势（双轴）/ 请求数 / 模型分布 / 余额四图表、官方失败降级本地估算并标注、CSV/JSON 导出）/ ConfigPage（手动粘贴 + 登录入口，显示凭据有效期，`onPageShow` 重读状态并消费跨页提示）/ LoginPage（官网 WebView 登录：主判据是 800ms 轮询 `WebCookieManager.fetchCookieSync` 出现 session，`onLoadIntercept` 捕 `/dashboard` 重定向只是加速用的快路径且实测不触发；10 分钟等待看门狗；有效期经 `fetchAllCookies(false)` 读取）。
 - `entry/src/main/ets/model/` — Api（官网接口，同桌面版 api.rs 协议与容错，含 fetchDashboard 与 fetchUsageStats 区间聚合；`ApiError.isAuthError` 对应桌面端 `code === 'auth'`）/ Store（preferences 存凭据 + RDB 存快照，schema 同桌面版 db.rs，含 request_count 与 `cookie_expires_at`；另提供按日快照查询、累计差分派生请求数、本地估算汇总）/ Secret（HUKS AES-256-GCM 凭据加密）。
-- `entry/src/main/ets/common/` — Theme（主题常量）/ BreakpointSystem（sm<600 / 600≤md<840 / lg≥840 vp 断点）/ GridBackground（网格背景）/ Format（纯函数工具，含 `parseSessionCookie`、`parseCookieExpiry`、`localRfc3339`、`formatLocalDateTime`）/ LineChart（Canvas 折线图：双轴、降级虚线、null 断线）/ DonutChart（Canvas 环图）/ Export（CSV/JSON 组装，字段口径对齐桌面版，系统 Picker 另存）/ Notify（低余额通知：percent<10 一次，回升重置）。
+- `entry/src/main/ets/common/` — Theme（主题常量）/ BreakpointSystem（sm<600 / 600≤md<840 / lg≥840 vp 断点）/ GridBackground（网格背景）/ Format（纯函数工具，含 `parseSessionCookie`、`parseCookieExpiry`、`localRfc3339`、`formatLocalDateTime`）/ LineChart（Canvas 折线图：双轴、降级虚线、null 断线）/ DonutChart（Canvas 环图）/ Export（CSV/JSON 组装，字段口径对齐桌面版，系统 Picker 另存）/ **Alert**（告警引擎：基准构建、规则判定、消息文案，与桌面 `src-tauri/src/alert.rs` 同口径）/ **Deliver**（投递层：系统通知 + MeoW 推送，无 SMTP；失败分类 sent/retryable/failed）/ AlertPanel（设置页告警区 UI：三条规则开关 + 四个参数调校 + 总开关 + 通知渠道 + 测试投递 + 当日投递复盘）。
 - `entry/src/main/ets/workscheduler/` — RefreshWorkSchedulerExtension：退后台时申请 WorkScheduler 延迟任务，由系统按条件调度执行一次完整刷新（拉数 → 存快照 → 低余额检查），完成后重新申请形成机会性周期。
 - `entry/src/main/ets/entryability/` — EntryAbility：窗口生命周期、断点注册（须待窗口上屏后）、onBackground 申请延迟刷新。
 - `entry/src/test/` — 本地单元测试（Format 等纯函数，@ohos/hypium）。
@@ -67,4 +67,5 @@ D:/command-line-tools/bin/hvigorw.bat test -p module=entry -p product=default -p
 
 - 二期已完成：统计页（趋势 / 模型分布 / 汇总 / 余额）、CSV / JSON 导出、低余额通知、WorkScheduler 后台刷新。
 - 三期已完成：凭据生命周期（登录看门狗、有效期展示、一键重登、`onPageShow`）。
+- **四期已完成**：告警引擎对齐桌面端（Alert/Deliver/Alerts/AlertPanel，系统通知+MeoW，无 SMTP；编排入口被 DashboardPage 前台刷新与 WorkScheduler 后台刷新共用）。
 - **已否决**：跨端历史快照导入（两端日末条按 `MAX(id)` 取值，导入的外部快照会改写本地当日日末值；若将来重提，前置条件是先改成按 `saved_at` 判定并加唯一约束）。除此以外当前无既定后续路线。

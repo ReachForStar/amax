@@ -1,8 +1,11 @@
-// 存储层：preferences 库 config 存认证凭据（经 Secret 加密），RDB 库 amax_dashboard.db 存刷新快照
-// schema 与桌面版 src-tauri/src/db.rs 的 dashboard_snapshot 表逐字段一致
+// 存储层：preferences 库 config 存认证凭据（经 Secret 加密）与告警配置（明文），RDB 库 amax_dashboard.db 存刷新快照与告警账本
+// schema 与桌面版 src-tauri/src/db.rs 的 dashboard_snapshot / alert_state / alert_delivery 表逐字段一致
 // initStore 由 EntryAbility 启动时调用一次；未初始化即调用其余接口抛明确错误
 import { preferences, relationalStore } from '@kit.ArkData';
 import { encryptSecret, decryptSecret } from './Secret';
+import {
+  AlertSettings, RuleCount, defaultSettings, resolveRulesEnabled, RULE_KEYS, sanitizeSettings,
+} from '../common/Alert';
 
 const CONFIG_STORE = 'config';
 const DB_NAME = 'amax_dashboard.db';
@@ -10,6 +13,16 @@ const KEY_COOKIE = 'cookie';
 const KEY_API_KEY = 'api_key';
 const KEY_COOKIE_SOURCE = 'cookie_source';
 const KEY_COOKIE_EXPIRES_AT = 'cookie_expires_at';
+// 告警配置键名与桌面版 db.rs 的 config 表逐一对应（两端各存本机，不做同步）
+const KEY_ALERT_ENABLED = 'alert_enabled';
+const KEY_ALERT_QUOTA_PERCENT = 'alert_quota_percent';
+const KEY_ALERT_RUNOUT_DAYS = 'alert_runout_days';
+const KEY_ALERT_SPIKE_MULTIPLIER = 'alert_spike_multiplier';
+const KEY_ALERT_MAX_FIRES_PER_DAY = 'alert_max_fires_per_day';
+const KEY_ALERT_RULE_PREFIX = 'alert_rule_';
+const KEY_ALERT_CH_NOTIFICATION = 'alert_ch_notification';
+const KEY_ALERT_CH_MEOW = 'alert_ch_meow';
+const KEY_MEOW_NICKNAME = 'meow_nickname';
 
 export interface SnapshotRow {
   savedAt: string;        // 本地时区 RFC3339
@@ -81,6 +94,31 @@ export async function initStore(context: Context): Promise<void> {
       request_count INTEGER
     )`
   );
+  // 告警账本：alert_state 是跨进程去重（前台刷新与 WorkScheduler 扩展各一进程，重启也不复位），
+  // alert_delivery 只增不改地记下每次投递结果与失败原因
+  await db.executeSql(
+    `CREATE TABLE IF NOT EXISTS alert_state (
+      rule_key TEXT NOT NULL,
+      day TEXT NOT NULL,
+      count INTEGER NOT NULL,
+      last_fired_at TEXT NOT NULL,
+      PRIMARY KEY (rule_key, day)
+    )`
+  );
+  await db.executeSql(
+    `CREATE TABLE IF NOT EXISTS alert_delivery (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_key TEXT NOT NULL,
+      day TEXT NOT NULL,
+      channel TEXT NOT NULL,
+      ok INTEGER NOT NULL,
+      error TEXT,
+      delivered_at TEXT NOT NULL
+    )`
+  );
+  await db.executeSql(
+    `CREATE INDEX IF NOT EXISTS idx_alert_delivery_day ON alert_delivery(day)`
+  );
 }
 
 export async function getCookie(): Promise<string | null> {
@@ -135,6 +173,210 @@ export async function clearCredentials(): Promise<void> {
   await store.delete(KEY_COOKIE_SOURCE);
   await store.delete(KEY_COOKIE_EXPIRES_AT);
   await store.flush();
+}
+
+// ═══ 告警配置与账本 ═══
+// 配置走 preferences（与凭据同库，但都是明文本机配置），账本走 RDB 两张告警表。
+// 键名与表结构与桌面版 db.rs 一一对应；两端各存本机、互不同步。
+
+async function getNumber(key: string, fallback: number): Promise<number> {
+  const stored = await requireConfig().get(key, fallback) as number;
+  const value = Number(stored);
+  return Number.isFinite(value) ? value : fallback;
+}
+
+async function getFlag(key: string, fallback: boolean): Promise<boolean> {
+  return await requireConfig().get(key, fallback) as boolean;
+}
+
+/// 读取告警参数；未落库的键取默认值，落库的脏值一律夹回合法区间
+export async function getAlertSettings(): Promise<AlertSettings> {
+  const defaults = defaultSettings();
+  const settings: AlertSettings = {
+    enabled: await getFlag(KEY_ALERT_ENABLED, defaults.enabled),
+    quotaPercent: await getNumber(KEY_ALERT_QUOTA_PERCENT, defaults.quotaPercent),
+    runoutDays: await getNumber(KEY_ALERT_RUNOUT_DAYS, defaults.runoutDays),
+    spikeMultiplier: await getNumber(KEY_ALERT_SPIKE_MULTIPLIER, defaults.spikeMultiplier),
+    maxFiresPerDay: await getNumber(KEY_ALERT_MAX_FIRES_PER_DAY, defaults.maxFiresPerDay),
+  };
+  return sanitizeSettings(settings);
+}
+
+/// 写入前一律 sanitizeSettings，并回读存进去的值——界面据此显示，不会亮出一个并不生效的数字
+export async function setAlertSettings(settings: AlertSettings): Promise<AlertSettings> {
+  const saved = sanitizeSettings(settings);
+  const store = requireConfig();
+  await store.put(KEY_ALERT_ENABLED, saved.enabled);
+  await store.put(KEY_ALERT_QUOTA_PERCENT, saved.quotaPercent);
+  await store.put(KEY_ALERT_RUNOUT_DAYS, saved.runoutDays);
+  await store.put(KEY_ALERT_SPIKE_MULTIPLIER, saved.spikeMultiplier);
+  await store.put(KEY_ALERT_MAX_FIRES_PER_DAY, saved.maxFiresPerDay);
+  await store.flush();
+  return getAlertSettings();
+}
+
+/// 启用的规则 key；未落库即默认开启，不要求用户先动过设置
+export async function getAlertRulesEnabled(): Promise<string[]> {
+  const enabled: string[] = [];
+  for (const key of RULE_KEYS) {
+    if (await getFlag(`${KEY_ALERT_RULE_PREFIX}${key}`, true)) {
+      enabled.push(key);
+    }
+  }
+  return enabled;
+}
+
+/// 未传即保持现状；传了必须全在已知规则集合内（未知 key 抛错，同桌面版 resolve_rules_enabled）
+export async function setAlertRulesEnabled(requested: string[] | null): Promise<string[]> {
+  const resolved = resolveRulesEnabled(await getAlertRulesEnabled(), requested);
+  const store = requireConfig();
+  for (const key of RULE_KEYS) {
+    await store.put(`${KEY_ALERT_RULE_PREFIX}${key}`, resolved.includes(key));
+  }
+  await store.flush();
+  return resolved;
+}
+
+export interface AlertChannels {
+  notification: boolean;
+  meow: boolean;
+  meowNickname: string | null;
+}
+
+/// 渠道开关 + MeoW 昵称。昵称只是收件路由名，按明文配置存、界面原样回显；
+/// 手机端唯一的凭据仍是 Cookie / API Key（SMTP 邮件是桌面端专属渠道）
+export async function getAlertChannels(): Promise<AlertChannels> {
+  const nickname = await requireConfig().get(KEY_MEOW_NICKNAME, '') as string;
+  return {
+    notification: await getFlag(KEY_ALERT_CH_NOTIFICATION, true),
+    meow: await getFlag(KEY_ALERT_CH_MEOW, false),
+    meowNickname: nickname.length > 0 ? nickname : null,
+  };
+}
+
+export interface ChannelInput {
+  notification: boolean;
+  meow: boolean;
+  meowNickname: string;
+}
+
+/// 开关与昵称每次整体覆盖（界面改了什么就提交什么），昵称清空即删除
+export async function setAlertChannels(input: ChannelInput): Promise<AlertChannels> {
+  const store = requireConfig();
+  await store.put(KEY_ALERT_CH_NOTIFICATION, input.notification);
+  await store.put(KEY_ALERT_CH_MEOW, input.meow);
+  const nickname = input.meowNickname.trim();
+  if (nickname.length === 0) {
+    await store.delete(KEY_MEOW_NICKNAME);
+  } else {
+    await store.put(KEY_MEOW_NICKNAME, nickname);
+  }
+  await store.flush();
+  return getAlertChannels();
+}
+
+/// 当日各规则已投次数（未知 rule_key 由上层忽略）
+export async function getAlertDayCounts(day: string): Promise<RuleCount[]> {
+  let resultSet: relationalStore.ResultSet | null = null;
+  try {
+    resultSet = await requireDb().querySql(
+      'SELECT rule_key, count FROM alert_state WHERE day=?', [day]);
+    const keyIdx = resultSet.getColumnIndex('rule_key');
+    const countIdx = resultSet.getColumnIndex('count');
+    const rows: RuleCount[] = [];
+    while (resultSet.goToNextRow()) {
+      rows.push({ key: resultSet.getString(keyIdx), count: resultSet.getLong(countIdx) });
+    }
+    return rows;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : JSON.stringify(error);
+    throw new Error(`告警账本查询失败：${reason}`);
+  } finally {
+    if (resultSet) {
+      resultSet.close();
+    }
+  }
+}
+
+/// 记一次「这条规则今天投过了」：同 (规则, 日) 累加，跨进程与重启都不复位
+export async function recordAlertFire(ruleKey: string, day: string, firedAt: string): Promise<void> {
+  await requireDb().executeSql(
+    `INSERT INTO alert_state(rule_key, day, count, last_fired_at) VALUES(?, ?, 1, ?)
+     ON CONFLICT(rule_key, day)
+     DO UPDATE SET count=count+1, last_fired_at=excluded.last_fired_at`,
+    [ruleKey, day, firedAt]);
+}
+
+/// 渠道投递结果，只增不改；error 由调用方保证已截断且不含凭据
+export async function recordAlertDelivery(ruleKey: string, day: string, channel: string,
+  ok: boolean, error: string | null, deliveredAt: string): Promise<void> {
+  await requireDb().executeSql(
+    `INSERT INTO alert_delivery(rule_key, day, channel, ok, error, delivered_at)
+     VALUES(?, ?, ?, ?, ?, ?)`,
+    [ruleKey, day, channel, ok ? 1 : 0, error, deliveredAt]);
+}
+
+/// 当日某规则已失败几次：给「可重试的投递失败」封顶，避免每轮刷新撞同一堵墙
+export async function countAlertFailures(ruleKey: string, day: string): Promise<number> {
+  let resultSet: relationalStore.ResultSet | null = null;
+  try {
+    resultSet = await requireDb().querySql(
+      'SELECT COUNT(*) AS failures FROM alert_delivery WHERE rule_key=? AND day=? AND ok=0',
+      [ruleKey, day]);
+    if (!resultSet.goToNextRow()) {
+      return 0;
+    }
+    return resultSet.getLong(resultSet.getColumnIndex('failures'));
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : JSON.stringify(error);
+    throw new Error(`告警失败次数查询失败：${reason}`);
+  } finally {
+    if (resultSet) {
+      resultSet.close();
+    }
+  }
+}
+
+/// 当日各渠道的投递明细（设置页复盘用，按时间倒序）
+export interface DeliveryLog {
+  ruleKey: string;
+  channel: string;
+  ok: boolean;
+  error: string | null;
+  deliveredAt: string;
+}
+
+export async function recentAlertDeliveries(day: string, limit: number): Promise<DeliveryLog[]> {
+  let resultSet: relationalStore.ResultSet | null = null;
+  try {
+    resultSet = await requireDb().querySql(
+      `SELECT rule_key, channel, ok, error, delivered_at
+       FROM alert_delivery WHERE day=? ORDER BY id DESC LIMIT ?`,
+      [day, limit]);
+    const ruleIdx = resultSet.getColumnIndex('rule_key');
+    const channelIdx = resultSet.getColumnIndex('channel');
+    const okIdx = resultSet.getColumnIndex('ok');
+    const errorIdx = resultSet.getColumnIndex('error');
+    const atIdx = resultSet.getColumnIndex('delivered_at');
+    const rows: DeliveryLog[] = [];
+    while (resultSet.goToNextRow()) {
+      rows.push({
+        ruleKey: resultSet.getString(ruleIdx),
+        channel: resultSet.getString(channelIdx),
+        ok: resultSet.getLong(okIdx) === 1,
+        error: resultSet.isColumnNull(errorIdx) ? null : resultSet.getString(errorIdx),
+        deliveredAt: resultSet.getString(atIdx),
+      });
+    }
+    return rows;
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : JSON.stringify(error);
+    throw new Error(`投递明细查询失败：${reason}`);
+  } finally {
+    if (resultSet) {
+      resultSet.close();
+    }
+  }
 }
 
 export async function saveSnapshot(row: SnapshotRow): Promise<void> {

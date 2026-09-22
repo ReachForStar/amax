@@ -16,7 +16,7 @@
 | 官网登录取凭据 | 应用内 WebView 打开官网登录页，自动提取整串 Session Cookie（含 HTTP-only），手动粘贴保留为兜底 |
 | 托盘与后台刷新 | 关闭/最小化即隐藏到托盘；每 10 分钟后台刷新；托盘菜单可刷新/恢复窗口/检查更新/退出 |
 | 自动更新 | 启动 15 秒后首查、之后每 24 小时一查，发现新版本立即下载验签；主窗口隐藏/最小化或连续 90 秒无操作且后台刷新不在飞行中时才安装并重启，设置页可手动检查或「现在重启并安装」 |
-| 低余额通知 | 剩余额度低于 10% 时发一次系统通知（后台/托盘刷新触发），恢复到阈值以上后重置 |
+| 额度告警 | 桌面端三条规则：剩余额度低于阈值、按近 7 日日均算出的耗尽天数进入阈值、当日花费达到近 7 日中位数的指定倍数（后台与托盘刷新时评估）；阈值与每日最多通知次数存于本机配置，默认 10% / 5 天 / 3× / 2 次，在设置页「告警规则」区逐条开关与调参（右上角显示今日已通知次数 / 上限，随 `alert://status` 刷新）；同一规则同日只通知一次且重启不重复。投递渠道为系统通知 / MeoW 推送 / SMTP 邮件（QQ 邮箱授权码），在设置页「通知渠道」区勾选与填写，可逐渠道测试投递并查看当日投递记录；MeoW 昵称按明文配置保存、界面原样回显，QQ 邮箱授权码按 DPAPI 绑定本机当前用户保存、界面只给「是否已配」。手机端现已对齐桌面端三规则引擎（Alert/Deliver/Alerts/AlertPanel），投递渠道为系统通知 + MeoW 推送（无 SMTP）。 |
 | 失效引导 | 凭据失效时回到配置页并直接指向登录入口；桌面端后台刷新撞上失效会主动广播引导重登 |
 
 ## 快速开始（桌面端）
@@ -62,7 +62,7 @@ src-tauri/src/
   login.rs       官网 WebView 登录窗与 Cookie 提取
 ```
 
-前端通过 `window.__TAURI__` 调用十个 IPC command（`get_config` / `save_config` / `fetch_dashboard` / `get_local_stats` / `fetch_usage_stats` / `open_login_window` / `get_app_version` / `report_user_activity` / `check_for_updates_now` / `apply_update_now`），后端经 `dashboard-updated`、`login://success|cancelled|timeout`、`auth://expired`、`update://status` 事件回推。CSP 的 `connect-src` 只允许 Tauri IPC，HTTP 请求一律由 Rust 侧 reqwest 发起，前端不直连官网。
+前端通过 `window.__TAURI__` 调用十五个 IPC command（`get_config` / `save_config` / `fetch_dashboard` / `get_local_stats` / `fetch_usage_stats` / `open_login_window` / `get_app_version` / `report_user_activity` / `check_for_updates_now` / `apply_update_now` / `get_alert_settings` / `set_alert_settings` / `get_alert_channels` / `set_alert_channels` / `test_alert_channel`），后端经 `dashboard-updated`、`login://success|cancelled|timeout`、`auth://expired`、`update://status`、`alert://status` 事件回推。CSP 的 `connect-src` 只允许 Tauri IPC，HTTP 请求一律由 Rust 侧 reqwest 发起，前端不直连官网（MeoW 与 SMTP 同理，都由后端发出）。
 
 自动更新的"什么时候装"由 Rust 侧单点判定：`report_user_activity` 只是前端活动的心跳（节流 5 秒），空闲阈值 90 秒这个常量只存在于 `lib.rs`，就绪文案随 `update://status` 一起下发，前端不复制一份。`update()` 在 Windows 上拉起 msiexec 后立即 `exit(0)`，所以下载与安装必须分成两段——先备好包再等时机，而不是检测到就装。
 

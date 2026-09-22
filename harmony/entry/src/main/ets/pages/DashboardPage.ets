@@ -7,7 +7,7 @@
 import { Theme } from '../common/Theme';
 import { GridBackground } from '../common/GridBackground';
 import { formatTokens, formatYuan, ApiError, localRfc3339 } from '../common/Format';
-import { checkLowQuota } from '../common/Notify';
+import { runAlerts } from '../model/Alerts';
 import { getCookie, saveSnapshot } from '../model/Store';
 import { fetchDashboard, DashboardData } from '../model/Api';
 
@@ -101,8 +101,16 @@ struct DashboardPage {
           total: data.total,
           requestCount: data.requestCount,
         });
-        // 刷新成功后检查低余额：内部自带 try/catch，失败仅记日志，不会把刷新置为失败
-        await checkLowQuota(data.percent, data.remaining, data.total);
+        // 告警评估与投递不挂在刷新路径上：MeoW 最坏等满 15 秒超时，下拉刷新不该转那么久的圈。
+        // 引擎整条链路自己兜错，这里的 catch 只收住它没预料到的 rejection。
+        runAlerts({
+          percent: data.percent,
+          remaining: data.remaining,
+          total: data.total,
+          todayYuan: data.todayYuan,
+        }).catch((error: Error): void => {
+          console.error(`告警评估失败（不影响看板）：${error.message}`);
+        });
       } catch (error) {
         if (error instanceof ApiError && error.isAuthError) {
           // 与桌面版 auth://expired → focusRelogin 同路径：提示凭据失效并落到配置页的登录入口

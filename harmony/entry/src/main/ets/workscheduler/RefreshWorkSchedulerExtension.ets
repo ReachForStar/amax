@@ -1,5 +1,5 @@
 // 延迟任务（WorkScheduler）后台刷新扩展：应用退后台后由系统按条件调度，执行一次完整刷新
-// （initStore → getCookie → fetchDashboard → saveSnapshot → checkLowQuota），积累每日快照。
+// （initStore → getCookie → fetchDashboard → saveSnapshot → runAlerts），积累每日快照并评估告警。
 //
 // 明确约束（系统硬限制，文档查证 work-scheduler / js-apis-resourceschedule-workscheduler）：
 // 1. 延迟任务触发时机由系统按条件调度（网络/充电/空闲、内存、功耗、温度、用户使用习惯等），
@@ -14,7 +14,7 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { initStore, getCookie, saveSnapshot } from '../model/Store';
 import { fetchDashboard } from '../model/Api';
 import { localRfc3339 } from '../common/Format';
-import { checkLowQuota } from '../common/Notify';
+import { runAlerts } from '../model/Alerts';
 
 const TAG = 'RefreshWorkScheduler';
 // 任务唯一 ID：startWork/stopWork/getWorkStatus 均按此 ID 识别任务
@@ -100,8 +100,14 @@ export default class RefreshWorkSchedulerExtension extends WorkSchedulerExtensio
         total: data.total,
         requestCount: data.requestCount,
       });
-      // 后台刷新同样触发低余额检查（Extension 进程内标志独立，与前台进程互不影响）
-      await checkLowQuota(data.percent, data.remaining, data.total);
+      // 后台刷新同样评估告警：这里必须 await —— 回调一返回扩展进程就可能被回收，
+      // 投递没跑完等于这条告警既没送出去也没记账（前台看板那侧才是不阻塞的 fire-and-forget）
+      await runAlerts({
+        percent: data.percent,
+        remaining: data.remaining,
+        total: data.total,
+        todayYuan: data.todayYuan,
+      });
       console.info(`${TAG} 后台刷新完成：剩余 ¥${data.remaining.toFixed(2)}（${data.percent.toFixed(1)}%）`);
     } catch (error) {
       // 认证失败（cookie 过期）等所有异常仅记日志：Extension 进程无法导航回配置页，
