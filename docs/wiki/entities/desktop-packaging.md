@@ -31,3 +31,4 @@ status: active
 - 2026-09-29：源码版本升级到 0.2.6。`cargo tauri build` 生成中英文 MSI 与对应 `.sig`；`scripts/verify-desktop-bundle.ps1` 已核对 `amax.exe` 的版本和关键功能标记，以及两个 MSI 内的 `ProductVersion`、`File` 表中的 `amax.exe` 版本。标签构建加 `-RequireSignatures` 检查签名文件，手动构建不强制签名。签名使用本地现有密钥和空口令生成；正式发布仍由发布工作流核对密钥标识与线上资产。
 - 2026-09-29：接入 `ReachForStar/amax` 的 `master` 时发现，远端已有告警后端，但 `dist/index.html` 缺少“告警规则”和“通知渠道”区域；本地 `dist/app.js`、`dist/style.css` 和前端测试也存在未提交的配套改动。CI 从远端检出源码，故此前本地构建有功能、远端发布安装包却缺功能。发布前必须把前端配套文件与 `Cargo.lock` 一同提交。
 - 2026-09-29：告警前端、对应测试、`Cargo.lock` 与 0.2.6 版本文件提交为 `9aa3dc4`；官网直连、打包校验和知识库提交为 `6ffb51c`。两个提交已推送到远端 `master`，发布源码现已包含告警界面。
+- 2026-09-29：代码提交 `6ffb51c` 的 GitHub Windows Test 工作流 `36546013697` 已成功；本地中英文 MSI 由同一工作区源码构建，并通过版本、功能内容和签名文件核验。
