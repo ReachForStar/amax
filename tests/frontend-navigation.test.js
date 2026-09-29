@@ -20,6 +20,7 @@ class Element {
   constructor({ hidden = false, value = '' } = {}) {
     this.classList = new ClassList(hidden ? ['hidden'] : []);
     this.value = value;
+    this.checked = false;
     this.placeholder = '';
     this.textContent = '';
     this.disabled = false;
@@ -31,6 +32,12 @@ class Element {
     this.title = '';
   }
   addEventListener(type, handler) { this.listeners.set(type, handler); }
+  // app.js 沿用真实 DOM 的 className 整体赋值写法（见 config-status），harness 必须让
+  // 它与 classList 同步，否则测试看到的 hidden/error 状态会和浏览器里的不一样
+  get className() { return [...this.classList.values].join(' '); }
+  set className(name) {
+    this.classList = new ClassList(String(name).split(/\s+/).filter(Boolean));
+  }
   dispatch(type, event = {}) {
     return this.listeners.get(type)?.({ preventDefault() {}, key: '', ...event });
   }
@@ -57,6 +64,14 @@ function createHarness({
   versionError,
   checkUpdateError,
   applyUpdateError,
+  channelsPayload,
+  channelsError,
+  setChannelsError,
+  testChannelError,
+  testChannelResult = { ok: true, channel: 'notification', error: null },
+  alertSettingsPayload,
+  alertSettingsError,
+  setAlertSettingsError,
 } = {}) {
   const ids = [
     'config-screen', 'dashboard-screen', 'config-status', 'skeleton', 'error-msg',
@@ -67,6 +82,18 @@ function createHarness({
     'login-btn', 'cookie-expiry',
     // 更新区元素
     'app-version', 'update-status', 'check-update-btn', 'apply-update-btn',
+    // 通知渠道区元素
+    'ch-notification', 'ch-meow', 'ch-mail', 'ch-notification-state', 'ch-meow-state',
+    'ch-mail-state', 'meow-nickname-input', 'smtp-host',
+    'smtp-port', 'smtp-tls', 'smtp-user', 'smtp-to', 'smtp-auth-code',
+    'clear-smtp-auth-code', 'channel-notices', 'channels-status', 'save-channels-btn',
+    'test-notification-btn', 'test-meow-btn', 'test-mail-btn', 'delivery-log',
+    'delivery-summary',
+    // 告警规则区元素
+    'alert-enabled', 'rule-quota-low', 'rule-runout-soon', 'rule-spike',
+    'alert-quota-percent', 'alert-runout-days', 'alert-spike-multiplier',
+    'alert-max-fires', 'alert-progress', 'alert-settings-status',
+    'save-alert-settings-btn',
     // 统计页与导出元素：harness 需覆盖 app.js 顶层引用的全部 #id，否则 vm 加载即抛错
     'stats-screen', 'stats-btn', 'stats-back-btn', 'range-start', 'range-end',
     'range-error', 'summary-title', 'trend-note', 'trend-error', 'trend-chart',
@@ -126,6 +153,11 @@ function createHarness({
   const saveConfigCalls = [];
   // 更新相关命令按调用顺序记录（check / apply），活动上报只数次数（5 秒节流）
   const updateCalls = [];
+  // 渠道命令入参原样记下，测试据此断言「凭据留空不提交」「清除才提交空串」
+  const setChannelsCalls = [];
+  const testChannelCalls = [];
+  // 告警参数按整包 args 记下（settings + rulesEnabled），测试据此断言提交形状
+  const setAlertSettingsCalls = [];
   let activityCalls = 0;
   let resolveSaveConfig;
   const saveConfigPromise = pendingSaveConfig
@@ -133,6 +165,78 @@ function createHarness({
     : null;
   // 统计用量请求队列：每个请求挂起，测试按需以任意顺序 resolve
   const usageCalls = [];
+  // deliver::view 的最小可信形状：只开系统通知、没填过昵称也没配过凭据
+  const defaultChannelsPayload = () => ({
+    channels: {
+      notification: { enabled: true, available: 'ready' },
+      meow: { enabled: false, available: 'off', nickname: null, notice: null },
+      mail: {
+        enabled: false, available: 'off', host: '', port: 465, tls: 'implicit',
+        user: '', to: '', authCodeConfigured: false, notice: null,
+      },
+      problems: [],
+    },
+    deliveries: [],
+  });
+  // 后端保存后回读的是真实视图，桩里按提交值映射，保证「回读覆盖输入框」这条路被测到
+  const viewFromSubmission = (submitted) => ({
+    notification: {
+      enabled: submitted.notification,
+      available: submitted.notification ? 'ready' : 'off',
+    },
+    meow: {
+      enabled: submitted.meow,
+      available: submitted.meow && submitted.meowNickname ? 'ready' : 'off',
+      nickname: submitted.meowNickname || null,
+      notice: null,
+    },
+    mail: {
+      enabled: submitted.mail,
+      available: 'off',
+      host: submitted.smtp?.host ?? '',
+      port: submitted.smtp?.port ?? 465,
+      tls: submitted.smtp?.tls ?? 'implicit',
+      user: submitted.smtp?.user ?? '',
+      to: submitted.smtp?.to ?? '',
+      authCodeConfigured: Boolean(submitted.smtp?.authCode),
+      notice: null,
+    },
+    problems: [],
+  });
+  // get_alert_settings 的最小可信形状：默认参数、三条规则全开、今天还没投过（区间与后端 param_ranges 一致）
+  const defaultAlertSettingsPayload = () => ({
+    settings: {
+      enabled: true, quotaPercent: 10, runoutDays: 5,
+      spikeMultiplier: 3, maxFiresPerDay: 2,
+    },
+    rulesEnabled: ['quota_low', 'runout_soon', 'spike'],
+    paramRanges: [
+      { key: 'quota_percent', min: 1, max: 99 },
+      { key: 'runout_days', min: 1, max: 90 },
+      { key: 'spike_multiplier', min: 1.5, max: 100 },
+      { key: 'max_fires_per_day', min: 0, max: 10 },
+    ],
+    status: { state: 'armed', day: '2026-09-22', firedToday: 0, cap: 2 },
+  });
+  // 后端 set_alert_settings 回读的是 sanitized() 之后的值，桩照做同样的夹取，
+  // 才能测出「界面显示的是真正生效的那个数」
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+  const alertSettingsFromSubmission = ({ settings, rulesEnabled }) => ({
+    settings: {
+      enabled: settings.enabled,
+      quotaPercent: clamp(settings.quotaPercent, 1, 99),
+      runoutDays: clamp(settings.runoutDays, 1, 90),
+      spikeMultiplier: clamp(settings.spikeMultiplier, 1.5, 100),
+      maxFiresPerDay: clamp(settings.maxFiresPerDay, 0, 10),
+    },
+    rulesEnabled,
+    status: {
+      state: settings.enabled ? 'armed' : 'disabled',
+      day: '2026-09-22',
+      firedToday: 0,
+      cap: clamp(settings.maxFiresPerDay, 0, 10),
+    },
+  });
   const invoke = async (command, args) => {
     invokeCalls.push(command);
     if (command === 'get_config') {
@@ -181,6 +285,29 @@ function createHarness({
       activityCalls += 1;
       return undefined;
     }
+    if (command === 'get_alert_channels') {
+      if (channelsError) throw channelsError;
+      return channelsPayload ?? defaultChannelsPayload();
+    }
+    if (command === 'set_alert_channels') {
+      setChannelsCalls.push(args.channels);
+      if (setChannelsError) throw setChannelsError;
+      return viewFromSubmission(args.channels);
+    }
+    if (command === 'test_alert_channel') {
+      testChannelCalls.push(args.channel);
+      if (testChannelError) throw testChannelError;
+      return testChannelResult;
+    }
+    if (command === 'get_alert_settings') {
+      if (alertSettingsError) throw alertSettingsError;
+      return alertSettingsPayload ?? defaultAlertSettingsPayload();
+    }
+    if (command === 'set_alert_settings') {
+      setAlertSettingsCalls.push(args);
+      if (setAlertSettingsError) throw setAlertSettingsError;
+      return alertSettingsFromSubmission(args);
+    }
     return undefined;
   };
   const eventHandlers = new Map();
@@ -212,6 +339,9 @@ function createHarness({
     chartStubInstances,
     confirmCalls,
     updateCalls,
+    setChannelsCalls,
+    testChannelCalls,
+    setAlertSettingsCalls,
     documentListeners,
     activityCalls: () => activityCalls,
     // 同类型可能挂了多个监听（如 keydown：返回看板 + 活动上报），按注册顺序全部触发
@@ -721,6 +851,439 @@ test('用户活动应节流上报，且不与返回看板的 Escape 冲突', asy
   app.dispatchDocument('keydown', { key: 'Escape' });
   assert.equal(app.activityCalls(), 1);
   assert.equal(app.elements['dashboard-screen'].classList.contains('hidden'), false);
+});
+
+// ═══ 告警规则 ═══
+
+test('进入设置页应回显告警参数、规则勾选与当日进度', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+
+  assert.equal(e['alert-enabled'].checked, true);
+  assert.equal(e['rule-quota-low'].checked, true);
+  assert.equal(e['rule-runout-soon'].checked, true);
+  assert.equal(e['rule-spike'].checked, true);
+  assert.equal(e['alert-quota-percent'].value, '10');
+  assert.equal(e['alert-runout-days'].value, '5');
+  assert.equal(e['alert-spike-multiplier'].value, '3');
+  assert.equal(e['alert-max-fires'].value, '2');
+  assert.equal(e['alert-progress'].textContent, '待触发 · 今天 0/2 次');
+  // 区间只有一份来源：后端 param_ranges 覆盖界面上的静态默认值
+  assert.equal(e['alert-quota-percent'].max, '99');
+  assert.equal(e['alert-runout-days'].max, '90');
+  assert.equal(e['alert-spike-multiplier'].min, '1.5');
+  assert.equal(e['alert-max-fires'].min, '0');
+});
+
+test('保存应提交 camelCase 参数与勾选规则的 key 子集', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+  e['alert-quota-percent'].value = '20';
+  e['alert-max-fires'].value = '4';
+  e['rule-spike'].checked = false;
+  await e['save-alert-settings-btn'].dispatch('click');
+  await app.flush();
+
+  assert.deepEqual(plain(app.setAlertSettingsCalls), [{
+    settings: {
+      enabled: true, quotaPercent: 20, runoutDays: 5,
+      spikeMultiplier: 3, maxFiresPerDay: 4,
+    },
+    rulesEnabled: ['quota_low', 'runout_soon'],
+  }]);
+  assert.match(e['alert-settings-status'].textContent, /已保存/);
+  assert.equal(e['alert-settings-status'].classList.contains('error'), false);
+});
+
+test('越界参数应按后端夹取结果回显，不留下界面与库里不一致的数字', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+  e['alert-quota-percent'].value = '200';
+  await e['save-alert-settings-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.setAlertSettingsCalls.at(-1).settings.quotaPercent, 200);
+  assert.equal(e['alert-quota-percent'].value, '99');
+  assert.equal(e['alert-progress'].textContent, '待触发 · 今天 0/2 次');
+});
+
+test('参数留空不该被静默夹成下限值', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+  e['alert-runout-days'].value = '';
+  e['alert-spike-multiplier'].value = '';
+  await e['save-alert-settings-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.setAlertSettingsCalls.length, 0, '不合法的输入不该打到后端');
+  assert.equal(e['alert-settings-status'].classList.contains('error'), true);
+  assert.match(e['alert-settings-status'].textContent, /请填写：可用天数（天）、花费倍数（倍）/);
+  // 拦下之后输入框保持用户写的内容，不替他改数
+  assert.equal(e['alert-runout-days'].value, '');
+});
+
+test('整数字段带小数应给出可读提示而非 serde 类型错误', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+  e['alert-max-fires'].value = '1.5';
+  await e['save-alert-settings-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.setAlertSettingsCalls.length, 0);
+  assert.match(e['alert-settings-status'].textContent, /需为整数：每日最多通知（次）/);
+});
+
+test('每日最多通知 0 次是合法输入，表示当日全部静默', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+  e['alert-max-fires'].value = '0';
+  await e['save-alert-settings-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.setAlertSettingsCalls.at(-1).settings.maxFiresPerDay, 0);
+  assert.equal(e['alert-max-fires'].value, '0');
+});
+
+test('告警设置读取失败不该挡住渠道区与参数填写', async () => {
+  const app = createHarness({ alertSettingsError: { code: 'storage', message: '数据库不可用' } });
+  await openSettings(app);
+  const e = app.elements;
+
+  assert.equal(e['alert-settings-status'].classList.contains('error'), true);
+  assert.match(e['alert-settings-status'].textContent, /告警设置读取失败：数据库不可用/);
+  // 渠道区照常读出并渲染
+  assert.equal(e['ch-notification'].checked, true);
+  assert.equal(e['delivery-summary'].textContent, '今日无投递');
+  // 参数区停在空值上，用户仍能直接填
+  e['alert-quota-percent'].value = '15';
+  e['alert-runout-days'].value = '3';
+  e['alert-spike-multiplier'].value = '2';
+  e['alert-max-fires'].value = '1';
+  await e['save-alert-settings-btn'].dispatch('click');
+  await app.flush();
+  assert.equal(app.setAlertSettingsCalls.at(-1).settings.quotaPercent, 15);
+});
+
+test('alert://status 事件应刷新当日进度行', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+
+  app.emitEvent('alert://status', {
+    state: 'cap_hit', day: '2026-09-22', firedToday: 2, cap: 2,
+  });
+  assert.equal(e['alert-progress'].textContent, '今日已达上限 · 今天 2/2 次');
+
+  app.emitEvent('alert://status', {
+    state: 'disabled', day: '2026-09-23', firedToday: 0, cap: 2,
+  });
+  assert.equal(e['alert-progress'].textContent, '已停用 · 今天 0/2 次');
+});
+
+test('未保存的告警参数在返回看板前应确认，保存后不再打扰', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+
+  e['alert-quota-percent'].value = '25';
+  await e['back-btn'].dispatch('click');
+  assert.deepEqual(app.confirmCalls, ['放弃未保存的修改并返回吗？']);
+
+  await e['save-alert-settings-btn'].dispatch('click');
+  await app.flush();
+  await e['back-btn'].dispatch('click');
+  assert.deepEqual(app.confirmCalls, ['放弃未保存的修改并返回吗？'], '保存成功后不该再确认第二次');
+  assert.equal(e['config-screen'].classList.contains('hidden'), true);
+});
+
+test('告警规则区应可访问且按钮不带提交语义', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'dist', 'index.html'), 'utf8');
+  const tagOf = (id) => html.match(new RegExp(`<(input|button)[^>]*id="${id}"[^>]*>`))?.[0] ?? '';
+
+  assert.match(html, /<section class="alert-block"[^>]*aria-labelledby="rules-title"/);
+  assert.match(tagOf('save-alert-settings-btn'), /type="button"/);
+  assert.match(html, /id="alert-settings-status"[^>]*role="status"/);
+  assert.match(tagOf('alert-quota-percent'), /type="number"/);
+  assert.match(tagOf('alert-max-fires'), /min="0"/);
+  // 参数区在 form 之外，误按回车不该触发凭据保存
+  assert.equal(html.indexOf('<form id="config-form"') < html.indexOf('id="alert-quota-percent"'), true);
+  assert.equal(html.indexOf('</form>') < html.indexOf('id="alert-quota-percent"'), true);
+});
+
+// ═══ 通知渠道 ═══
+
+// 一个「三个渠道都开着、昵称已填、授权码解不开、库里还有脏字段」的视图：
+// 覆盖明文回显与打码回显这两条不同的口径、状态标签、提示汇总与投递复盘
+function richChannelsPayload() {
+  return {
+    channels: {
+      notification: { enabled: true, available: 'ready' },
+      meow: { enabled: true, available: 'ready', nickname: 'pikachu', notice: null },
+      mail: {
+        enabled: true, available: 'incomplete', host: 'smtp.qq.com', port: 465, tls: 'implicit',
+        user: 'me@qq.com', to: 'you@qq.com', authCodeConfigured: true,
+        notice: '凭据无法解密（换过机器或 Windows 用户），请重新填写',
+      },
+      problems: ['smtp_port 不是合法端口，已按 465 保存'],
+    },
+    deliveries: [
+      { rule: 'quota_low', channel: 'mail', ok: true, error: null, at: '2026-09-22T08:15:00Z' },
+      { rule: 'spike', channel: 'meow', ok: false, error: '连接超时', at: '2026-09-22T07:02:00Z' },
+    ],
+  };
+}
+
+async function openSettings(harness) {
+  await harness.flush();
+  await harness.elements['settings-btn'].dispatch('click');
+  await harness.flush();
+}
+
+// app.js 跑在 vm 上下文里，它造出的对象带着另一个 realms 的 Object 原型，
+// deepStrictEqual 会因为「同结构不同引用」判失败——断言前先归一成宿主纯对象
+const plain = (value) => JSON.parse(JSON.stringify(value));
+
+test('进入设置页应原样回显昵称并把授权码按打码口径展示', async () => {
+  const app = createHarness({ channelsPayload: richChannelsPayload() });
+  await openSettings(app);
+  const e = app.elements;
+
+  assert.equal(e['ch-notification'].checked, true);
+  assert.equal(e['ch-meow'].checked, true);
+  assert.equal(e['ch-mail'].checked, true);
+  assert.equal(e['ch-notification-state'].textContent, '可用');
+  assert.equal(e['ch-meow-state'].textContent, '可用');
+  assert.equal(e['ch-mail-state'].textContent, '缺配置');
+
+  // 昵称是明文配置：输入框里就是库里的值，可以直接改
+  assert.equal(e['meow-nickname-input'].value, 'pikachu');
+  // 授权码是真凭据：视图不给原值，输入框必须留空，靠 placeholder 说明「已保存」，靠「清除」才允许删
+  assert.equal(e['smtp-auth-code'].value, '');
+  assert.match(e['smtp-auth-code'].placeholder, /已保存/);
+  assert.equal(e['clear-smtp-auth-code'].classList.contains('hidden'), false);
+  assert.equal(e['smtp-host'].value, 'smtp.qq.com');
+  assert.equal(e['smtp-port'].value, '465');
+  assert.equal(e['smtp-to'].value, 'you@qq.com');
+
+  assert.match(e['channel-notices'].textContent, /无法解密/);
+  assert.match(e['channel-notices'].textContent, /smtp_port/);
+  assert.equal(e['channel-notices'].classList.contains('hidden'), false);
+
+  assert.equal(e['delivery-summary'].textContent, '今日 2 条投递');
+  assert.match(e['delivery-log'].textContent, /08:15 额度低于阈值 · 邮件 · 已送达/);
+  assert.match(e['delivery-log'].textContent, /07:02 用量突增 · MeoW 推送 · 失败：连接超时/);
+});
+
+test('未配任何凭据时渠道区应干净呈现且不留陈旧提示', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+
+  assert.equal(e['ch-meow'].checked, false);
+  assert.equal(e['meow-nickname-input'].value, '');
+  assert.equal(e['clear-smtp-auth-code'].classList.contains('hidden'), true);
+  assert.equal(e['channel-notices'].classList.contains('hidden'), true);
+  assert.equal(e['delivery-summary'].textContent, '今日无投递');
+  assert.equal(e['delivery-log'].classList.contains('hidden'), true);
+  assert.equal(e['channels-status'].classList.contains('hidden'), true);
+});
+
+test('只开系统通知时保存应提交 smtp:null 且不带上任何凭据', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  await app.elements['save-channels-btn'].dispatch('click');
+  await app.flush();
+
+  assert.deepEqual(plain(app.setChannelsCalls), [{
+    notification: true, meow: false, mail: false, meowNickname: '', smtp: null,
+  }]);
+  assert.equal(app.elements['channels-status'].classList.contains('error'), false);
+  assert.match(app.elements['channels-status'].textContent, /已保存/);
+});
+
+test('填了 SMTP 明文但没开邮件也应整体提交，避免丢弃已输入内容', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+  e['smtp-host'].value = 'smtp.exmail.qq.com';
+  e['smtp-port'].value = '465';
+  e['smtp-user'].value = 'me@qq.com';
+  await e['save-channels-btn'].dispatch('click');
+  await app.flush();
+
+  assert.deepEqual(plain(app.setChannelsCalls[0].smtp), {
+    host: 'smtp.exmail.qq.com', port: 465, tls: 'implicit', user: 'me@qq.com',
+    to: '', authCode: null,
+  });
+  assert.equal(app.setChannelsCalls[0].mail, false);
+});
+
+test('点清除才提交空授权码，留空表示保持原值', async () => {
+  const app = createHarness({ channelsPayload: richChannelsPayload() });
+  await openSettings(app);
+  await app.elements['clear-smtp-auth-code'].dispatch('click');
+  await app.flush();
+
+  const submitted = app.setChannelsCalls[app.setChannelsCalls.length - 1];
+  assert.equal(submitted.smtp.authCode, '');
+  // 昵称不是凭据：清除授权码不该把它一起抹掉，提交的仍是库里回显的原值
+  assert.equal(submitted.meowNickname, 'pikachu');
+  assert.match(app.elements['channels-status'].textContent, /授权码已清除/);
+});
+
+test('把昵称清空再保存就是删除，不需要额外的清除按钮', async () => {
+  const app = createHarness({ channelsPayload: richChannelsPayload() });
+  await openSettings(app);
+  const e = app.elements;
+  e['meow-nickname-input'].value = '';
+  await e['save-channels-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.setChannelsCalls.at(-1).meowNickname, '');
+  assert.equal(e['meow-nickname-input'].value, '');
+  assert.equal(e['ch-meow-state'].textContent, '未开启');
+});
+
+test('保存成功后应清空授权码输入并按后端视图回读昵称', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+  e['ch-meow'].checked = true;
+  e['meow-nickname-input'].value = 'pikachu';
+  await e['save-channels-btn'].dispatch('click');
+  await app.flush();
+
+  // 昵称回读后仍留在框里（明文配置），授权码则必须被清掉（真凭据）
+  assert.equal(e['meow-nickname-input'].value, 'pikachu');
+  assert.equal(e['smtp-auth-code'].value, '');
+  assert.equal(e['ch-meow-state'].textContent, '可用');
+  // 回读之后表单应与基线一致，返回看板不该再要求确认
+  e['back-btn'].dispatch('click');
+  assert.deepEqual(app.confirmCalls, []);
+});
+
+test('渠道保存失败应保留输入并在下次返回时提示未保存', async () => {
+  const app = createHarness({ setChannelsError: { code: 'input', message: 'QQ 邮箱主机不合法' } });
+  await openSettings(app);
+  const e = app.elements;
+  e['smtp-host'].value = 'smtp.qq.com';
+  e['ch-mail'].checked = true;
+  await e['save-channels-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(e['channels-status'].classList.contains('error'), true);
+  assert.match(e['channels-status'].textContent, /QQ 邮箱主机不合法/);
+  assert.equal(e['smtp-host'].value, 'smtp.qq.com');
+  assert.equal(e['save-channels-btn'].disabled, false);
+
+  // 写库失败时基线不能推进：这些输入仍是未保存的修改
+  await e['back-btn'].dispatch('click');
+  assert.deepEqual(app.confirmCalls, ['放弃未保存的修改并返回吗？']);
+});
+
+test('测试投递按钮应按渠道调用后端并复盘当日投递记录', async () => {
+  const app = createHarness({ channelsPayload: richChannelsPayload() });
+  await openSettings(app);
+  const before = app.invokeCalls.filter((call) => call === 'get_alert_channels').length;
+  await app.elements['test-mail-btn'].dispatch('click');
+  await app.flush();
+
+  assert.deepEqual(app.testChannelCalls, ['mail']);
+  assert.match(app.elements['channels-status'].textContent, /邮件：测试消息已送达/);
+  assert.equal(app.elements['test-mail-btn'].disabled, false);
+  const after = app.invokeCalls.filter((call) => call === 'get_alert_channels').length;
+  assert.equal(after, before + 1, '测试完应重读投递记录');
+});
+
+test('测试投递被后端判为失败时应展示脱敏原因而不是成功文案', async () => {
+  const app = createHarness({
+    channelsPayload: richChannelsPayload(),
+    testChannelResult: { ok: false, channel: 'meow', error: 'HTTP 429 请求过于频繁' },
+  });
+  await openSettings(app);
+  await app.elements['test-meow-btn'].dispatch('click');
+  await app.flush();
+
+  assert.equal(app.elements['channels-status'].classList.contains('error'), true);
+  assert.match(app.elements['channels-status'].textContent, /MeoW 推送测试失败：HTTP 429 请求过于频繁/);
+});
+
+test('测试投递抛错应回到可操作状态并给出错误', async () => {
+  const app = createHarness({
+    channelsPayload: richChannelsPayload(),
+    testChannelError: { code: 'network', message: 'DNS 解析失败' },
+  });
+  await openSettings(app);
+  await app.elements['test-notification-btn'].dispatch('click');
+  await app.flush();
+
+  assert.match(app.elements['channels-status'].textContent, /系统通知测试失败：DNS 解析失败/);
+  assert.equal(app.elements['test-notification-btn'].disabled, false);
+  assert.equal(app.elements['save-channels-btn'].disabled, false);
+});
+
+test('渠道设置读取失败不应挡住凭据配置', async () => {
+  const app = createHarness({ channelsError: { code: 'storage', message: '数据库不可用' } });
+  await openSettings(app);
+  const e = app.elements;
+
+  assert.equal(e['config-screen'].classList.contains('hidden'), false);
+  assert.equal(e['back-btn'].classList.contains('hidden'), false);
+  assert.equal(e['config-status'].classList.contains('hidden'), true);
+  assert.equal(e['channels-status'].classList.contains('error'), true);
+  assert.match(e['channels-status'].textContent, /渠道设置读取失败：数据库不可用/);
+
+  // 离开再进来：上一次的降级提示不该残留成误导
+  app.dispatchDocument('keydown', { key: 'Escape' });
+  assert.equal(e['channels-status'].textContent, '');
+  await openSettings(app);
+  assert.match(e['channels-status'].textContent, /渠道设置读取失败/);
+});
+
+test('未保存的渠道修改在返回看板前应确认', async () => {
+  const app = createHarness({ confirm: false });
+  await openSettings(app);
+  app.elements['ch-meow'].checked = true;
+  await app.elements['back-btn'].dispatch('click');
+
+  assert.deepEqual(app.confirmCalls, ['放弃未保存的修改并返回吗？']);
+  assert.equal(app.elements['config-screen'].classList.contains('hidden'), false);
+});
+
+test('保存凭据成功不应清空用户改到一半的渠道输入', async () => {
+  const app = createHarness();
+  await openSettings(app);
+  const e = app.elements;
+  e['smtp-host'].value = 'smtp.qq.com';
+  e['cookie-input'].value = `session=${'a'.repeat(50)}`;
+  await e['config-form'].dispatch('submit');
+  await app.flush();
+
+  assert.equal(e['smtp-host'].value, 'smtp.qq.com');
+  assert.equal(e['cookie-input'].value, '');
+  // 渠道那半截修改仍在，返回时仍要确认
+  await e['back-btn'].dispatch('click');
+  assert.deepEqual(app.confirmCalls, ['放弃未保存的修改并返回吗？']);
+});
+
+test('设置页的通知渠道区应可访问且只把授权码当凭据藏起来', () => {
+  const html = fs.readFileSync(path.join(__dirname, '..', 'dist', 'index.html'), 'utf8');
+  // 属性顺序不该让测试失败，故按标签取出来再查单个属性
+  const tagOf = (id) => html.match(new RegExp(`<(input|button)[^>]*id="${id}"[^>]*>`))?.[0] ?? '';
+
+  assert.match(html, /<section class="alert-block"[^>]*aria-labelledby="channels-title"/);
+  assert.match(tagOf('meow-nickname-input'), /type="text"/);
+  assert.match(tagOf('smtp-auth-code'), /type="password"/);
+  assert.match(tagOf('save-channels-btn'), /type="button"/);
+  assert.match(html, /id="channels-status"[^>]*role="status"/);
+  // 昵称没有「清除」这层语义，输入框留空保存即是删除
+  assert.equal(html.includes('clear-meow-nickname'), false);
 });
 
 // ═══ 统计页 ═══

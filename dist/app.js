@@ -52,6 +52,45 @@ const applyUpdateBtn = $('#apply-update-btn');
 const exportCsvBtn = $('#export-csv-btn');
 const exportJsonBtn = $('#export-json-btn');
 const exportXlsxBtn = $('#export-xlsx-btn');
+const chNotification = $('#ch-notification');
+const chMeow = $('#ch-meow');
+const chMail = $('#ch-mail');
+const channelStates = {
+  notification: $('#ch-notification-state'),
+  meow: $('#ch-meow-state'),
+  mail: $('#ch-mail-state'),
+};
+const meowNicknameInput = $('#meow-nickname-input');
+const smtpHost = $('#smtp-host');
+const smtpPort = $('#smtp-port');
+const smtpTls = $('#smtp-tls');
+const smtpUser = $('#smtp-user');
+const smtpTo = $('#smtp-to');
+const smtpAuthCode = $('#smtp-auth-code');
+const clearSmtpAuthCode = $('#clear-smtp-auth-code');
+const channelNotices = $('#channel-notices');
+const channelsStatus = $('#channels-status');
+const saveChannelsBtn = $('#save-channels-btn');
+const testNotificationBtn = $('#test-notification-btn');
+const testMeowBtn = $('#test-meow-btn');
+const testMailBtn = $('#test-mail-btn');
+const deliveryLog = $('#delivery-log');
+const deliverySummary = $('#delivery-summary');
+const alertEnabledBox = $('#alert-enabled');
+const ruleBoxes = {
+  quota_low: $('#rule-quota-low'),
+  runout_soon: $('#rule-runout-soon'),
+  spike: $('#rule-spike'),
+};
+const alertParamInputs = {
+  quota_percent: $('#alert-quota-percent'),
+  runout_days: $('#alert-runout-days'),
+  spike_multiplier: $('#alert-spike-multiplier'),
+  max_fires_per_day: $('#alert-max-fires'),
+};
+const alertProgress = $('#alert-progress');
+const alertSettingsStatus = $('#alert-settings-status');
+const saveAlertSettingsBtn = $('#save-alert-settings-btn');
 
 let hasDashboardData = false;
 let hasSavedCookie = false;
@@ -106,16 +145,26 @@ function setLoginPending(pending) {
   loginBtn.textContent = pending ? '等待登录…' : '使用官网登录获取';
 }
 
-function resetConfigForm() {
+function resetCredentialForm() {
   cookieInput.value = '';
   apikeyInput.value = '';
   configBaseline = { cookie: '', apiKey: '' };
   configStatus.classList.add('hidden');
 }
 
+// 进入/离开设置页时凭据、告警、渠道一起清空；但「保存并验证」成功只清凭据区——
+// 顺手清掉用户刚改到一半的告警参数或渠道输入等于替他做了决定
+function resetConfigForm() {
+  resetCredentialForm();
+  resetAlertForm();
+  resetChannelForm();
+}
+
 function isConfigDirty() {
   return cookieInput.value !== configBaseline.cookie
-    || apikeyInput.value !== configBaseline.apiKey;
+    || apikeyInput.value !== configBaseline.apiKey
+    || isAlertFormDirty()
+    || isChannelFormDirty();
 }
 
 function leaveSettings() {
@@ -239,7 +288,7 @@ configForm.addEventListener('submit', async (event) => {
     renderCookieExpiry({ has_cookie: hasSavedCookie, cookie_expires_at: null });
     if (await loadDashboard()) {
       setConfigBusy(false);
-      resetConfigForm();
+      resetCredentialForm();
     }
   } catch (e) {
     setConfigBusy(false);
@@ -247,6 +296,342 @@ configForm.addEventListener('submit', async (event) => {
     showConfigError(getErrorCode(e) === 'auth' ? authHint(msg) : '连接失败：' + msg);
   }
 });
+
+// ═══ 告警规则 ═══
+// 数值区间只由后端 param_ranges() 提供一份，这里只登记「配置键 ↔ 表单控件 ↔ 视图字段」的对应关系
+const ALERT_PARAMS = [
+  { key: 'quota_percent', field: 'quotaPercent', label: '剩余额度阈值（%）' },
+  { key: 'runout_days', field: 'runoutDays', label: '可用天数（天）', integer: true },
+  { key: 'spike_multiplier', field: 'spikeMultiplier', label: '花费倍数（倍）' },
+  { key: 'max_fires_per_day', field: 'maxFiresPerDay', label: '每日最多通知（次）', integer: true },
+];
+const ALERT_STATE_LABELS = { disabled: '已停用', armed: '待触发', cap_hit: '今日已达上限' };
+
+let alertBaseline = null;
+
+function alertFormKey() {
+  return JSON.stringify([
+    alertEnabledBox.checked,
+    ...Object.values(ruleBoxes).map((box) => box.checked),
+    ...ALERT_PARAMS.map((param) => alertParamInputs[param.key].value),
+  ]);
+}
+
+function isAlertFormDirty() {
+  return alertBaseline !== null && alertFormKey() !== alertBaseline;
+}
+
+function resetAlertForm() {
+  alertEnabledBox.checked = false;
+  Object.values(ruleBoxes).forEach((box) => { box.checked = false; });
+  ALERT_PARAMS.forEach((param) => { alertParamInputs[param.key].value = ''; });
+  alertProgress.textContent = '--';
+  hideAlertSettingsStatus();
+  alertBaseline = null;
+}
+
+function setAlertSettingsStatus(kind, message) {
+  alertSettingsStatus.className = 'status'
+    + (kind === 'error' ? ' error' : kind === 'loading' ? ' loading' : '');
+  alertSettingsStatus.textContent = message;
+}
+
+function hideAlertSettingsStatus() {
+  alertSettingsStatus.className = 'status hidden';
+  alertSettingsStatus.textContent = '';
+}
+
+// 三种状态的负载字段一致，直接按固定字段渲染；账本读不到时留白，不拿 0 假装「今天还没投过」
+function applyAlertStatus(status) {
+  if (!status) {
+    alertProgress.textContent = '今日次数不可读';
+    return;
+  }
+  const state = ALERT_STATE_LABELS[status.state] ?? status.state;
+  alertProgress.textContent = `${state} · 今天 ${status.firedToday}/${status.cap} 次`;
+}
+
+function applyAlertSettings(data) {
+  const settings = data?.settings ?? {};
+  const enabledRules = Array.isArray(data?.rulesEnabled) ? data.rulesEnabled : [];
+  alertEnabledBox.checked = !!settings.enabled;
+  for (const [key, box] of Object.entries(ruleBoxes)) {
+    box.checked = enabledRules.includes(key);
+  }
+  for (const param of ALERT_PARAMS) {
+    const value = settings[param.field];
+    alertParamInputs[param.key].value = value === undefined || value === null ? '' : String(value);
+  }
+  for (const range of data?.paramRanges ?? []) {
+    const input = alertParamInputs[range.key];
+    if (!input) continue;
+    input.min = String(range.min);
+    input.max = String(range.max);
+  }
+  applyAlertStatus(data?.status);
+}
+
+// 空框提交会被后端夹成区间下限，用户看到的数字就此消失，所以在前端先挡住；
+// 天数与次数在库里是整数，带小数提交会被 serde 判成类型错误，那条提示用户读不懂
+function readAlertSettings() {
+  const settings = { enabled: alertEnabledBox.checked };
+  const missing = [];
+  const fractional = [];
+  for (const param of ALERT_PARAMS) {
+    const raw = alertParamInputs[param.key].value.trim();
+    const value = Number(raw);
+    if (raw === '' || !Number.isFinite(value)) {
+      missing.push(param.label);
+      continue;
+    }
+    if (param.integer && !Number.isInteger(value)) {
+      fractional.push(param.label);
+      continue;
+    }
+    settings[param.field] = value;
+  }
+  const parts = [];
+  if (missing.length) parts.push(`请填写：${missing.join('、')}`);
+  if (fractional.length) parts.push(`需为整数：${fractional.join('、')}`);
+  return parts.length ? { error: parts.join('；') } : { settings };
+}
+
+async function saveAlertSettings() {
+  const { error, settings } = readAlertSettings();
+  if (error) {
+    setAlertSettingsStatus('error', error);
+    return false;
+  }
+  saveAlertSettingsBtn.disabled = true;
+  setAlertSettingsStatus('loading', '正在保存告警设置…');
+  try {
+    const saved = await invoke('set_alert_settings', {
+      settings,
+      rulesEnabled: Object.entries(ruleBoxes)
+        .filter(([, box]) => box.checked)
+        .map(([key]) => key),
+    });
+    // 以库里的夹取结果回读：越界输入会被后端收敛，界面必须显示真正生效的那个数
+    applyAlertSettings(saved);
+    alertBaseline = alertFormKey();
+    setAlertSettingsStatus('', '已保存。下一次后台刷新生效。');
+    return true;
+  } catch (err) {
+    setAlertSettingsStatus('error', '保存失败：' + getErrorMessage(err));
+    return false;
+  } finally {
+    saveAlertSettingsBtn.disabled = false;
+  }
+}
+
+async function loadAlertSettings() {
+  try {
+    applyAlertSettings(await invoke('get_alert_settings'));
+  } catch (err) {
+    setAlertSettingsStatus('error', '告警设置读取失败：' + getErrorMessage(err));
+  } finally {
+    alertBaseline = alertFormKey();
+  }
+}
+
+saveAlertSettingsBtn.addEventListener('click', saveAlertSettings);
+
+// ═══ 通知渠道 ═══
+// 后端只回显打码值（见 src-tauri/src/deliver.rs 的 view()），所以两个凭据输入框读回来一律是空的：
+// 提交时「留空 = 保持原值」，只有点「清除」才真的删。把打码值原样提交回去会把真凭据覆盖掉。
+const CHANNEL_LABELS = { notification: '系统通知', meow: 'MeoW 推送', mail: '邮件' };
+const CHANNEL_STATE_LABELS = { ready: '可用', incomplete: '缺配置', off: '未开启' };
+const ALERT_RULE_LABELS = {
+  quota_low: '额度低于阈值',
+  runout_soon: '即将耗尽',
+  spike: '用量突增',
+  test: '测试投递',
+};
+
+let channelsBaseline = null;
+
+function channelFormKey() {
+  return JSON.stringify([
+    chNotification.checked, chMeow.checked, chMail.checked,
+    meowNicknameInput.value, smtpHost.value, smtpPort.value, smtpTls.value,
+    smtpUser.value, smtpTo.value, smtpAuthCode.value,
+  ]);
+}
+
+function isChannelFormDirty() {
+  return channelsBaseline !== null && channelFormKey() !== channelsBaseline;
+}
+
+function resetChannelForm() {
+  [chNotification, chMeow, chMail].forEach((box) => { box.checked = false; });
+  meowNicknameInput.value = '';
+  smtpHost.value = '';
+  smtpPort.value = '';
+  smtpTls.value = 'implicit';
+  smtpUser.value = '';
+  smtpTo.value = '';
+  smtpAuthCode.value = '';
+  smtpAuthCode.placeholder = '邮箱服务商签发的授权码';
+  clearSmtpAuthCode.classList.add('hidden');
+  Object.values(channelStates).forEach((el) => { el.textContent = ''; });
+  channelNotices.textContent = '';
+  channelNotices.classList.add('hidden');
+  hideChannelsStatus();
+  deliveryLog.textContent = '';
+  deliveryLog.classList.add('hidden');
+  deliverySummary.textContent = '--';
+  channelsBaseline = null;
+}
+
+function setChannelsStatus(kind, message) {
+  channelsStatus.className = 'status'
+    + (kind === 'error' ? ' error' : kind === 'loading' ? ' loading' : '');
+  channelsStatus.textContent = message;
+}
+
+function hideChannelsStatus() {
+  channelsStatus.className = 'status hidden';
+  channelsStatus.textContent = '';
+}
+
+function applyChannelView(view) {
+  if (!view) return;
+  const nodes = {
+    notification: view.notification ?? {},
+    meow: view.meow ?? {},
+    mail: view.mail ?? {},
+  };
+  chNotification.checked = !!nodes.notification.enabled;
+  chMeow.checked = !!nodes.meow.enabled;
+  chMail.checked = !!nodes.mail.enabled;
+  for (const [key, node] of Object.entries(nodes)) {
+    channelStates[key].textContent = CHANNEL_STATE_LABELS[node.available] ?? '';
+  }
+  // 昵称是明文配置，原样回显；只有授权码走「不留底」的凭据口径
+  meowNicknameInput.value = nodes.meow.nickname ?? '';
+
+  const mail = nodes.mail;
+  smtpHost.value = mail.host ?? '';
+  smtpPort.value = mail.port ? String(mail.port) : '';
+  smtpTls.value = mail.tls ?? 'implicit';
+  smtpUser.value = mail.user ?? '';
+  smtpTo.value = mail.to ?? '';
+  smtpAuthCode.placeholder = mail.authCodeConfigured ? '已保存，不修改请留空' : '邮箱服务商签发的授权码';
+  clearSmtpAuthCode.classList.toggle('hidden', !mail.authCodeConfigured);
+
+  const notices = [
+    nodes.meow.notice,
+    mail.notice,
+    ...(Array.isArray(view.problems) ? view.problems : []),
+  ].filter(Boolean);
+  channelNotices.textContent = notices.join('\n');
+  channelNotices.classList.toggle('hidden', notices.length === 0);
+}
+
+function renderDeliveries(rows) {
+  const list = Array.isArray(rows) ? rows : [];
+  deliverySummary.textContent = list.length ? `今日 ${list.length} 条投递` : '今日无投递';
+  deliveryLog.textContent = list.map((row) => {
+    const time = String(row.at ?? '').slice(11, 16);
+    const rule = ALERT_RULE_LABELS[row.rule] ?? row.rule;
+    const channel = CHANNEL_LABELS[row.channel] ?? row.channel;
+    return row.ok
+      ? `${time} ${rule} · ${channel} · 已送达`
+      : `${time} ${rule} · ${channel} · 失败：${row.error || '未知原因'}`;
+  }).join('\n');
+  deliveryLog.classList.toggle('hidden', list.length === 0);
+}
+
+function channelPayload({ clearAuthCode = false } = {}) {
+  const authCode = smtpAuthCode.value.trim();
+  const smtpUntouched = !smtpHost.value.trim() && !smtpUser.value.trim()
+    && !smtpTo.value.trim() && !authCode && !clearAuthCode;
+  return {
+    notification: chNotification.checked,
+    meow: chMeow.checked,
+    mail: chMail.checked,
+    // 整体覆盖：留空就是清空昵称，不像凭据那样有「不提交=保持原值」的语义
+    meowNickname: meowNicknameInput.value.trim(),
+    // 邮件没开且整块没填时提交 null：既不触发主机校验，也让后端保持原值
+    smtp: (chMail.checked || !smtpUntouched) ? {
+      host: smtpHost.value.trim(),
+      port: Number(smtpPort.value) || 0,
+      tls: smtpTls.value,
+      user: smtpUser.value.trim(),
+      to: smtpTo.value.trim(),
+      authCode: clearAuthCode ? '' : (authCode || null),
+    } : null,
+  };
+}
+
+async function saveChannels({ clearAuthCode = false } = {}) {
+  saveChannelsBtn.disabled = true;
+  setChannelsStatus('loading', '正在保存渠道设置…');
+  try {
+    const view = await invoke('set_alert_channels', {
+      channels: channelPayload({ clearAuthCode }),
+    });
+    smtpAuthCode.value = '';
+    applyChannelView(view);
+    // 基线只在写库成功后推进：失败时输入框里的仍是未保存的修改，得让返回时弹出确认
+    channelsBaseline = channelFormKey();
+    setChannelsStatus('', clearAuthCode
+      ? '已保存，邮件授权码已清除。'
+      : '已保存。渠道设置对下一次后台刷新生效。');
+    return true;
+  } catch (error) {
+    setChannelsStatus('error', '保存失败：' + getErrorMessage(error));
+    return false;
+  } finally {
+    saveChannelsBtn.disabled = false;
+  }
+}
+
+async function refreshDeliveries() {
+  try {
+    const data = await invoke('get_alert_channels');
+    renderDeliveries(data?.deliveries);
+  } catch {
+    deliverySummary.textContent = '投递记录不可读';
+  }
+}
+
+async function loadAlertChannels() {
+  try {
+    const data = await invoke('get_alert_channels');
+    applyChannelView(data?.channels);
+    renderDeliveries(data?.deliveries);
+  } catch (error) {
+    setChannelsStatus('error', '渠道设置读取失败：' + getErrorMessage(error));
+  } finally {
+    // 凭据输入框不参与基线：读回来就该是空的
+    channelsBaseline = channelFormKey();
+  }
+}
+
+async function testChannel(channel, button) {
+  button.disabled = true;
+  saveChannelsBtn.disabled = true;
+  setChannelsStatus('loading', `正在通过${CHANNEL_LABELS[channel]}发送测试消息…`);
+  try {
+    const result = await invoke('test_alert_channel', { channel });
+    const label = CHANNEL_LABELS[channel];
+    if (result?.ok) setChannelsStatus('', `${label}：测试消息已送达`);
+    else setChannelsStatus('error', `${label}测试失败：${result?.error || getErrorMessage(result)}`);
+  } catch (error) {
+    setChannelsStatus('error', `${CHANNEL_LABELS[channel]}测试失败：` + getErrorMessage(error));
+  } finally {
+    button.disabled = false;
+    saveChannelsBtn.disabled = false;
+    await refreshDeliveries();
+  }
+}
+
+saveChannelsBtn.addEventListener('click', () => saveChannels());
+clearSmtpAuthCode.addEventListener('click', () => saveChannels({ clearAuthCode: true }));
+testNotificationBtn.addEventListener('click', () => testChannel('notification', testNotificationBtn));
+testMeowBtn.addEventListener('click', () => testChannel('meow', testMeowBtn));
+testMailBtn.addEventListener('click', () => testChannel('mail', testMailBtn));
 
 // ═══ 自动更新 ═══
 // 后端只做「检查 → 下载 → 验签」，安装会直接结束本进程（msiexec 起新版本后自动拉起），
@@ -409,6 +794,9 @@ async function openSettings() {
     backBtn.classList.toggle('hidden', !canReturnToDashboard);
     showScreen('config');
     cookieInput.focus();
+    // 两个区块读不到都不该挡住凭据配置，各自内部已带降级提示
+    await loadAlertSettings();
+    await loadAlertChannels();
   } catch (error) {
     showError('无法打开设置：' + getErrorMessage(error));
   }
@@ -484,6 +872,11 @@ async function setupEventListener() {
     // 后台检查/下载/安装各阶段的状态：设置页状态行与「现在重启并安装」按钮的唯一来源
     window._unlistenUpdateStatus = await listen('update://status', (event) => {
       renderUpdateStatus(event.payload);
+    });
+
+    // 当日告警额度：后端只在内容变化时推，这里据此刷新「今天 x / cap 次」与状态词
+    window._unlistenAlertStatus = await listen('alert://status', (event) => {
+      applyAlertStatus(event.payload);
     });
   } catch (e) {
     console.error('监听后台刷新事件失败:', e);

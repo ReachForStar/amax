@@ -42,6 +42,27 @@ a { color: var(--accent); text-underline-offset: 3px; }
 .access-steps { margin: 2px 0 0; padding-left: 22px; color: var(--muted); font-size: 12px; line-height: 1.75; }
 .update-block { display: grid; gap: 9px; margin-top: 34px; padding-top: 22px; border-top: 1px solid var(--line); }
 .update-actions { display: flex; gap: 9px; }
+.alert-block { display: grid; gap: 11px; margin-top: 34px; padding-top: 22px; border-top: 1px solid var(--line); }
+.channel-row { display: flex; align-items: center; gap: 10px; min-height: 30px; }
+.channel-name { display: flex; align-items: center; gap: 8px; font-weight: 650; }
+.channel-name input { width: 15px; height: 15px; accent-color: var(--accent); }
+.channel-state { margin-left: auto; color: var(--faint); font: 10px var(--mono); letter-spacing: .06em; }
+.channel-actions { display: flex; }
+.rule-row .channel-name { flex: 1 1 auto; }
+.rule-row input[type="number"] { width: 62px; min-height: 28px; border: 1px solid var(--line); border-radius: 4px; background: rgba(242, 244, 241, .88); color: var(--ink); padding: 2px 6px; font: 11px var(--mono); }
+.rule-row input[type="number"]:focus-visible { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px rgba(44, 107, 75, .16); }
+.rule-unit { color: var(--faint); font-size: 11px; }
+.credential-row { display: flex; align-items: flex-start; gap: 8px; }
+.credential-row input { flex: 1 1 auto; min-width: 0; }
+.credential-row .btn.tiny { flex: 0 0 auto; margin-top: 9px; }
+.smtp-grid { display: grid; grid-template-columns: 1fr 96px; gap: 12px; }
+.smtp-grid .form-group { gap: 6px; }
+.smtp-grid .form-group > label { font-size: 12px; }
+.smtp-host-cell, .smtp-code-cell { grid-column: 1 / -1; }
+.smtp-grid select { width: 100%; min-height: 44px; border: 1px solid var(--line); border-radius: 4px; background: rgba(242, 244, 241, .88); color: var(--ink); padding: 10px 8px; font: 12px var(--mono); }
+.smtp-grid select:hover { border-color: #91a298; }
+.smtp-grid select:focus-visible { border-color: var(--accent); outline: 0; box-shadow: 0 0 0 3px rgba(44, 107, 75, .16); }
+.delivery-log { margin: 0; border-left: 2px solid var(--line); padding: 7px 10px; color: var(--muted); font: 10px/1.8 var(--mono); white-space: pre-line; overflow-wrap: anywhere; }
 .hint { margin: 0; color: var(--muted); font-size: 12px; }
 .status { border-left: 2px solid var(--accent); padding: 9px 11px; background: var(--accent-soft); color: var(--accent); font-size: 12px; line-height: 1.55; white-space: pre-line; }
 .status.error { border-color: var(--error); background: var(--error-bg); color: var(--error); }

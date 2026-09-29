@@ -51,6 +51,114 @@
         <button id="save-btn" type="submit" class="btn primary">保存并验证</button>
       </form>
 
+      <section class="alert-block" aria-labelledby="rules-title">
+        <div class="label-row">
+          <h2 id="rules-title" class="telemetry-label">告警规则</h2>
+          <span id="alert-progress">--</span>
+        </div>
+        <p class="hint">每条规则同日只通知一次，三条共用「每日最多通知次数」；改完点保存才对下一轮刷新生效。</p>
+
+        <div class="channel-row rule-row">
+          <label class="channel-name" for="rule-quota-low"><input type="checkbox" id="rule-quota-low" /> 剩余额度低于</label>
+          <input type="number" id="alert-quota-percent" min="1" max="99" step="1" inputmode="decimal" />
+          <span class="rule-unit">%</span>
+        </div>
+        <div class="channel-row rule-row">
+          <label class="channel-name" for="rule-runout-soon"><input type="checkbox" id="rule-runout-soon" /> 按近期日均还能用不足</label>
+          <input type="number" id="alert-runout-days" min="1" max="90" step="1" inputmode="numeric" />
+          <span class="rule-unit">天</span>
+        </div>
+        <div class="channel-row rule-row">
+          <label class="channel-name" for="rule-spike"><input type="checkbox" id="rule-spike" /> 当日花费达近 7 日中位数的</label>
+          <input type="number" id="alert-spike-multiplier" min="1.5" max="100" step="0.5" inputmode="decimal" />
+          <span class="rule-unit">倍</span>
+        </div>
+        <div class="channel-row rule-row">
+          <label class="channel-name" for="alert-max-fires">每日最多通知</label>
+          <input type="number" id="alert-max-fires" min="0" max="10" step="1" inputmode="numeric" />
+          <span class="rule-unit">次（0 为当日全部静默）</span>
+        </div>
+        <div class="channel-row rule-row">
+          <label class="channel-name" for="alert-enabled"><input type="checkbox" id="alert-enabled" /> 启用额度告警</label>
+        </div>
+
+        <p id="alert-settings-status" class="status hidden" role="status" aria-live="polite"></p>
+        <div class="channel-actions">
+          <button id="save-alert-settings-btn" type="button" class="btn primary">保存告警设置</button>
+        </div>
+      </section>
+
+      <section class="alert-block" aria-labelledby="channels-title">
+        <div class="label-row">
+          <h2 id="channels-title" class="telemetry-label">通知渠道</h2>
+          <span id="delivery-summary">--</span>
+        </div>
+        <p class="hint">额度告警只走这里开启的渠道；任一渠道送达即算当日投过。</p>
+
+        <div class="channel-row">
+          <label class="channel-name" for="ch-notification"><input type="checkbox" id="ch-notification" /> 系统通知</label>
+          <span id="ch-notification-state" class="channel-state"></span>
+          <button id="test-notification-btn" type="button" class="btn tiny">测试</button>
+        </div>
+
+        <div class="channel-row">
+          <label class="channel-name" for="ch-meow"><input type="checkbox" id="ch-meow" /> MeoW 推送</label>
+          <span id="ch-meow-state" class="channel-state"></span>
+          <button id="test-meow-btn" type="button" class="btn tiny">测试</button>
+        </div>
+        <div class="form-group">
+          <label for="meow-nickname-input">MeoW 昵称</label>
+          <input type="text" id="meow-nickname-input" placeholder="如 小明" autocomplete="off" />
+          <p class="hint">推送按昵称路由到你的手机；昵称明文只存本机，清空并保存即删除。</p>
+        </div>
+
+        <div class="channel-row">
+          <label class="channel-name" for="ch-mail"><input type="checkbox" id="ch-mail" /> 邮件</label>
+          <span id="ch-mail-state" class="channel-state"></span>
+          <button id="test-mail-btn" type="button" class="btn tiny">测试</button>
+        </div>
+        <div class="smtp-grid">
+          <div class="form-group smtp-host-cell">
+            <label for="smtp-host">SMTP 主机</label>
+            <input type="text" id="smtp-host" placeholder="smtp.qq.com" autocomplete="off" />
+          </div>
+          <div class="form-group">
+            <label for="smtp-port">端口</label>
+            <input type="number" id="smtp-port" min="1" max="65535" placeholder="465" />
+          </div>
+          <div class="form-group">
+            <label for="smtp-tls">加密</label>
+            <select id="smtp-tls">
+              <option value="implicit">implicit（465）</option>
+              <option value="starttls">starttls（587）</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="smtp-user">发件账号</label>
+            <input type="text" id="smtp-user" placeholder="bot@qq.com" autocomplete="off" />
+          </div>
+          <div class="form-group">
+            <label for="smtp-to">收件地址</label>
+            <input type="text" id="smtp-to" placeholder="me@qq.com" autocomplete="off" />
+          </div>
+          <div class="form-group smtp-code-cell">
+            <label for="smtp-auth-code">授权码</label>
+            <div class="credential-row">
+              <input type="password" id="smtp-auth-code" autocomplete="off" />
+              <button id="clear-smtp-auth-code" type="button" class="btn tiny hidden">清除</button>
+            </div>
+          </div>
+        </div>
+        <p class="hint">授权码由邮箱服务商签发（QQ / 163 需先在邮箱设置里开启 SMTP）；不启用邮件时这几项可全部留空。</p>
+
+        <p id="channel-notices" class="block-error hidden" role="status"></p>
+        <p id="channels-status" class="status hidden" role="status" aria-live="polite"></p>
+        <div class="channel-actions">
+          <button id="save-channels-btn" type="button" class="btn primary">保存通知渠道</button>
+        </div>
+        <p id="delivery-log" class="delivery-log hidden" aria-label="今日投递记录"></p>
+      </section>
+
       <section class="update-block" aria-labelledby="update-title">
         <div class="label-row">
           <h2 id="update-title" class="telemetry-label">更新</h2>
