@@ -1,4 +1,6 @@
 target/
+.qmd/
+tmp/
 .claude/
 
 # HarmonyOS

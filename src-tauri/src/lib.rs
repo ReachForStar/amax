@@ -21,6 +21,7 @@ use tauri_plugin_updater::UpdaterExt;
 pub struct AppState {
     db: Mutex<Db>,
     client: reqwest::Client,
+    delivery_client: reqwest::Client,
     refresh_lock: tokio::sync::Mutex<()>,
     /// 告警引擎状态：`last_payload` 只在负载变化时推 `alert://status`，避免每 10 分钟重复推送
     alert: Mutex<AlertState>,
@@ -595,7 +596,7 @@ async fn send_to_channel(
         deliver::Channel::Notification => Some(deliver::send_notification(app, title, body)),
         deliver::Channel::Meow => {
             let nickname = config.meow_nickname.clone()?;
-            let client = &app.state::<AppState>().client;
+            let client = &app.state::<AppState>().delivery_client;
             Some(deliver::send_meow(client, &nickname, title, body).await)
         }
         deliver::Channel::Mail => {
@@ -1087,9 +1088,11 @@ pub fn run() {
             }
             let db = Db::open(&path)?;
             let client = api::build_client()?;
+            let delivery_client = api::build_delivery_client()?;
             app.manage(AppState {
                 db: Mutex::new(db),
                 client,
+                delivery_client,
                 refresh_lock: tokio::sync::Mutex::new(()),
                 alert: Mutex::new(AlertState::default()),
                 alerts_in_flight: Mutex::new(std::collections::HashSet::new()),

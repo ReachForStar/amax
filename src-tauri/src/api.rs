@@ -132,6 +132,20 @@ pub struct DashboardData {
 }
 
 pub fn build_client() -> Result<reqwest::Client, AppError> {
+    // 官网直连已验证可用；绕开系统代理，避免本机代理停用后仍被系统设置劫持。
+    client_builder()
+        .no_proxy()
+        .build()
+        .map_err(|error| AppError::storage(format!("官网 HTTP 客户端初始化失败: {error}")))
+}
+
+pub fn build_delivery_client() -> Result<reqwest::Client, AppError> {
+    client_builder()
+        .build()
+        .map_err(|error| AppError::storage(format!("投递 HTTP 客户端初始化失败: {error}")))
+}
+
+fn client_builder() -> reqwest::ClientBuilder {
     let mut headers = HeaderMap::new();
     headers.insert(USER_AGENT, HeaderValue::from_static("Mozilla/5.0"));
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
@@ -143,8 +157,6 @@ pub fn build_client() -> Result<reqwest::Client, AppError> {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .pool_idle_timeout(Duration::from_secs(90))
-        .build()
-        .map_err(|error| AppError::storage(format!("HTTP 客户端初始化失败: {error}")))
 }
 
 /// 官网非 2xx 统一分级：401/403 是唯一能判定凭据失效的信号，
@@ -166,7 +178,7 @@ fn status_error(status: reqwest::StatusCode, api: &str) -> AppError {
 }
 
 fn network_error(error: reqwest::Error) -> AppError {
-    AppError::network(format!("网络连接失败, 请检查网络或代理设置: {error}"))
+    AppError::network(format!("官网直连失败, 请检查网络连接: {error}"))
 }
 
 fn date_to_string(date: NaiveDate) -> String {

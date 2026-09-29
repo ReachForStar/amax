@@ -45,6 +45,7 @@ node tests/frontend-navigation.test.js      # 前端逻辑回归（node:test + v
 - 唯一必需的凭据是官网的 **Session Cookie**（请求头整串）。API Key 仅作历史兼容保留，不参与任何请求。
 - 桌面端用 Windows DPAPI 把 Cookie/API Key 绑定当前用户 + 当前机器，落库格式 `dpapi:v1:<hex>`；手机端用 HUKS AES-256-GCM，格式 `huks:v1:<base64(iv|密文|tag)>`。**两者产物不可跨设备迁移，项目也不做跨设备凭据同步。**
 - 数据来自两个官网接口：`/api/user/self`（额度、用户 ID、累计请求数）与 `POST /v1/logs/token-usage/by-model`（当日/区间的 Token 与 quota 聚合，必须携带字符串形式 `user_id`）。
+- 桌面端官网数据请求使用独立的直连 HTTP 客户端，不受系统代理设置影响；MeoW 投递使用另一客户端，保留系统网络配置。
 - 费用换算 `QUOTA_PER_YUAN = 500_000`，即 `费用(元) = quota / 500000`。
 - Cookie **不设本地过期时间**，失效一律由服务端判定（返回认证错误）。配置页展示的有效期是官网真实下发值，**只做展示**，不参与任何倒计时或拦截；官网未下发时明示"失效由服务端判定"。
 - 本地数据：`%APPDATA%\com.amax.dashboard\amax_dashboard.db`（SQLite）。`config` 存凭据与 `cookie_expires_at`，`dashboard_snapshot` 存每次刷新的快照（含累计 `request_count`，永久保留不清理，旧库自动幂等迁移）。
@@ -77,6 +78,8 @@ src-tauri/src/
 | `.github/actions/verify/action.yml` | 被两个工作流调用 | `cargo fmt --check` → `clippy -D warnings` → `cargo test` → `node --check dist/app.js` → `node tests/frontend-navigation.test.js` |
 | `.github/workflows/test.yml` | push 到 master、PR、手动 | 在 `windows-latest` 跑上面那份检查；`paths-ignore` 跳过纯文档与纯 `harmony/` 改动；同分支旧任务自动取消 |
 | `.github/workflows/release.yml` | 推送 `v*` 标签、手动 | 先跑同一份检查，再 `cargo tauri build` 出 MSI 并发布 GitHub Release |
+
+发布构建后运行 `scripts/verify-desktop-bundle.ps1`，核对程序版本、告警功能内容与两个 MSI 的 `ProductVersion`。
 
 - 两个工作流都只能在 `windows-latest` 上跑：应用依赖 DPAPI / `windows-sys`，非 Windows 构建下 `crypto.rs` 的加解密一律返回 `Err`，跑不到真实路径。私有仓库的 Windows 分钟数按 2 倍计费，这是 `paths-ignore` 与 `concurrency` 存在的原因。
 - 发布门槛：标签号必须与 `src-tauri/tauri.conf.json` 的 `version` 一致，否则工作流直接失败（MSI 文件名会与 Release 标题对不上）；`Cargo.toml` 的 `version` 只用于 crate，不参与校验。

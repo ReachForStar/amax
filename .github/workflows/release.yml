@@ -89,6 +89,15 @@ jobs:
           }
           cargo tauri build
 
+      - name: Verify desktop bundle contents
+        shell: pwsh
+        run: |
+          if ("${{ startsWith(github.ref, 'refs/tags/') }}" -eq 'true') {
+            pwsh -File scripts/verify-desktop-bundle.ps1 -RequireSignatures
+          } else {
+            pwsh -File scripts/verify-desktop-bundle.ps1
+          }
+
       - name: List bundle output
         if: always()
         shell: pwsh
