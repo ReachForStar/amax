@@ -24,3 +24,4 @@ updated: 2026-10-08
 ## 查询沉淀 queries
 
 - [桌面官网请求受系统代理影响](queries/desktop-direct-network.md) — 直连证据、客户端隔离和验证状态。
+- [Linux 登录窗口不显示：系统代理挂起 WebKitGTK 加载](queries/linux-webview-proxy-hang.md) — 根因、GIO resolver 直连 + 10 秒兜底修复、测试时「已登录即关窗」陷阱。
