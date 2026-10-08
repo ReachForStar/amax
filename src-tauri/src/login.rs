@@ -22,6 +22,8 @@ const SITE_URL: &str = "https://ai.amaxsmp.com";
 const POLL_INTERVAL: Duration = Duration::from_millis(800);
 /// 看门狗：约 10 分钟未完成登录即放弃
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// 页面加载异常（连接挂起）时兜底显示窗口的等待上限；正常加载 1-2 秒内完成
+const DISPLAY_FALLBACK: Duration = Duration::from_secs(10);
 /// 登录窗 label，同时用于 capability/窗口查找
 const LOGIN_LABEL: &str = "login";
 /// 判定登录成功的 Cookie 名，口径同手机端 parseSessionCookie
@@ -118,6 +120,18 @@ pub async fn open_login_window(app: tauri::AppHandle) -> Result<(), AppError> {
     })
     .build()
     .map_err(|error| AppError::storage(format!("创建登录窗口失败: {error}")))?;
+
+    // 加载挂起（如系统代理导致连接无响应）时 on_page_load 永不触发，
+    // 兜底超时后窗口若仍隐藏则强制弹出，避免"点了按钮窗口不出现"的静默失败
+    let fallback_window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(DISPLAY_FALLBACK).await;
+        if matches!(fallback_window.is_visible(), Ok(false)) {
+            let _ = fallback_window
+                .show()
+                .and_then(|_| fallback_window.set_focus());
+        }
+    });
 
     // 取消：用户成功前关窗（成功/超时路径我们自己 close()，彼时 settled 已置位不误报）
     let cancel_settled = Arc::clone(&settled);

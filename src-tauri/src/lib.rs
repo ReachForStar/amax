@@ -1115,6 +1115,16 @@ fn db_path(app: &tauri::AppHandle) -> std::path::PathBuf {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK 默认经系统代理加载远程页面，而部分代理环境（如 127.0.0.1:7890）会让
+    // 连接挂起、页面永不完成加载（登录窗口因此永不显示，见 docs/wiki/queries/linux-webview-proxy-hang.md）。
+    // 官网登录窗口默认直连，与 api.rs 官网客户端的 no_proxy 策略一致；
+    // 显式设置该变量的用户（如切回 gnome）不被覆盖。
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("GIO_USE_PROXY_RESOLVER").is_none() {
+        // SAFETY: run() 由 main 最先调用，此时进程单线程，无并发读取环境变量
+        unsafe { std::env::set_var("GIO_USE_PROXY_RESOLVER", "dummy") };
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
