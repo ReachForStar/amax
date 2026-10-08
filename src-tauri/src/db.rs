@@ -101,7 +101,9 @@ impl Db {
             _ => {
                 let dir =
                     std::env::temp_dir().join(format!("amax-dashboard-{}", std::process::id()));
-                std::fs::create_dir_all(&dir)?;
+                std::fs::create_dir_all(&dir).map_err(|error| {
+                    AppError::storage(format!("创建凭据密钥临时目录失败: {error}"))
+                })?;
                 dir
             }
         };

@@ -29,6 +29,13 @@ status: active
 
 凭据存储两平台各一套：Windows `dpapi:v1:`（DPAPI），Linux `aes:v1:`（本机密钥文件 + AES-256-GCM），见 [Linux 凭据加密](../decisions/linux-credential-storage.md)。Linux 更新通道见 [Linux 发布产物与更新通道](../decisions/linux-release-and-update.md)。
 
+## Linux 构建约束（2026-10-08 首次全量编译确认）
+
+- 默认窗口图标必须是 RGBA：`generate_context!` 在非 Windows 目标取 `bundle.icon` 里第一个 `.png`（当前是 `icons/32x32.png`）作窗口图标，PNG 颜色类型不是 RGBA 时编译期直接 panic（`tauri-codegen` 的 `Image::new_png`，提示 `is not RGBA`）。Windows 分支走 `.ico`、从不解析 PNG，所以同一个图标在 Windows 上一直没暴露问题。改图标后用 `file` 确认 `8-bit/color RGBA`。
+- `[target.'cfg(windows)'.dependencies]` 必须排在 `[dependencies]` 全部键之后：插在中间会把其后的通用依赖误归入 Windows 段（曾把 `lettre`、`url` 卷进去），Linux 编译报 unresolved crate，Windows 反而正常。
+- `Db::open` 的密钥目录回退分支（`:memory:` 无父目录时退到进程专属临时目录）创建目录必须把 `io::Error` 显式映射为 `AppError::storage`：`AppError` 只实现了 `From<rusqlite::Error>`，裸 `?` 编译不过（分支两平台共用，Windows 同样失败）。
+- AppImage 首次打包会从 GitHub 下载 linuxdeploy / AppRun / 插件脚本（缓存于 `~/.cache/tauri/`）；本开发机直连 GitHub 超时，构建要带本机代理（`https_proxy=http://127.0.0.1:7890 http_proxy=...`），否则报 `io: Connection reset by peer`。
+
 ## 重要变更记录
 
 - 2026-09-29：工作区现存 MSI 为 0.2.3，源码配置与本机已安装程序为 0.2.5。已安装的 `amax.exe` 内可检出“告警规则”和相应命令字符串，因此不能仅凭工作区旧 MSI 推断已安装的 0.2.5 缺少告警代码。构建后需要同时核对 MSI 版本和嵌入的功能标记。
@@ -40,5 +47,7 @@ status: active
 - 2026-09-29：发布前核对 `master` 的本地与远端提交同为 `19660bd`，应用与 crate 版本均为 0.2.6；远端配置了 `TAURI_SIGNING_PRIVATE_KEY`，发布前尚无 `v0.2.6` 标签。当前网络直连 GitHub 超时，代理 `127.0.0.1:7890` 可连接 GitHub API，发布命令需显式使用该代理。
 - 2026-09-29：已推送 `v0.2.6` 注记标签，远端标签指向 `19660bd`；GitHub Release 工作流 `36547050572` 已启动。
 - 2026-09-29：`v0.2.6` 的 Release 工作流 `36547050572` 成功。公开 Release 含中英文 MSI、各自的 `.sig` 及 `latest.json`；工作流通过产物内容、签名与更新清单一致性、匿名访问校验。独立读取 `releases/latest/download/latest.json` 得到版本 0.2.6，下载 URL 指向本次中文版 MSI。
-- 2026-10-08：开发机迁到 Ubuntu 22.04，完成 Linux 完整适配：桌面代码（`crypto.rs`/`db.rs`/`lib.rs`/`Cargo.toml`/`dist/app.js`）、双平台 CI 与发布链路（`release.yml` 四作业、`action.yml` Linux 依赖步骤、`test.yml` 双平台）、三个发布脚本与 `tauri.linux.conf.json`。产物名与 Windows 同规则：磁盘名空格改点后上传（deb 形如 `AMAX.Dashboard_0.2.6_amd64.deb`，更新包为 AppImage 的 `.AppImage.tar.gz` + `.sig`）。本地构建验证待装系统依赖后进行；`cargo fmt` / 前端 66 条回归 / 脚本语法均已通过。
+- 2026-10-08：开发机迁到 Ubuntu 22.04，完成 Linux 完整适配：桌面代码（`crypto.rs`/`db.rs`/`lib.rs`/`Cargo.toml`/`dist/app.js`）、双平台 CI 与发布链路（`release.yml` 四作业、`action.yml` Linux 依赖步骤、`test.yml` 双平台）、三个发布脚本与 `tauri.linux.conf.json`。产物名与 Windows 同规则：磁盘名空格改点后上传（deb 形如 `AMAX.Dashboard_0.2.6_amd64.deb`；更新包即原始 AppImage，签名同目录 `.AppImage.sig`，`.AppImage.tar.gz` 只在 v1 兼容模式产出）。本地构建验证待装系统依赖后进行；`cargo fmt` / 前端 66 条回归 / 脚本语法均已通过。
 - 2026-10-08：仓库索引为 LF，但工作区残留 Windows 时期的 CRLF 文件；Linux 上无 autocrlf 时这些文件被 git 显示为「全文件改动」。已把工作区归一为 LF（与索引一致，无内容变化），避免提交时把整文件行尾重写带进历史。
+- 2026-10-08：系统依赖装齐后首次全量编译：`cargo fmt --check`、`clippy -D warnings`、`cargo test`（Rust 126 项）与前端 66 条回归全部通过。首轮编译暴露三处问题并修复（详见「Linux 构建约束」）：`icons/32x32.png` 由调色板 PNG 转 RGBA（`compare -metric AE` 逐像素比对为 0）、`lettre`/`url` 移回 `[dependencies]`、密钥目录创建错误显式映射 `AppError::storage`。首次 `workflow_dispatch` 验证运行 37740472558 正是倒在这三处上（Windows 作业 E0277、Linux 作业 11 个错误），修复后需重新触发验证。
+- 2026-10-08：本地打包链验证：`cargo tauri build` 产出 `AMAX.Dashboard_0.2.6_amd64.deb` 与 `AMAX.Dashboard_0.2.6_amd64.AppImage`（各自带 `.sig`）；`scripts/verify-desktop-bundle.sh --require-signatures` 通过（程序版本、功能标记、签名齐全）。从 `target/release/amax` 冒烟：进程存活、WebView 正常初始化（生成 WebKitCache）、数据库五张表建齐、无错误输出。`generate-updater-manifest.mjs` 用线上 v0.2.6 真实 MSI+签名与本地 Linux 产物做了端到端实测：输出正确，keyid 比对通过——同时交叉证实本机私钥与线上签名出自同一对密钥。

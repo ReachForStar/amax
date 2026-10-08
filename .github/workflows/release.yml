@@ -11,7 +11,9 @@
 #   （安装包文件名与 Release 标题会对不上）。Cargo.toml 的 version 只用于 crate，不影响产物。
 # - CHANGELOG.md 缺对应小节只告警不失败（回退为提交列表是既定行为）。
 # - 发布产物：Windows 两个 MSI（zh-CN / en-US）+ 各自 .sig；Linux 一个 deb（手动升级）+
-#   AppImage（独立下载）+ AppImage.tar.gz（AppImage 的更新包）+ .sig。
+#   AppImage（独立下载，同时就是应用内更新用的更新包）+ 其 .sig；deb 的 .sig 不上传。
+#   注意 createUpdaterArtifacts: true 是 v2 风格——更新包就是原始安装包本身并整体签名，
+#   v1 兼容模式才产出 .AppImage.tar.gz；清单的 url 与签名都指原始产物（v2 客户端原生支持）。
 # - 自动更新要求 bundle.createUpdaterArtifacts = true（生成 .sig），latest.json 由
 #   scripts/generate-updater-manifest.mjs 手工生成（cargo tauri build 不产出清单）。
 #   清单缺失、签名与公钥不匹配、端点匿名不可读，都会让应用内更新静默失效，
@@ -200,13 +202,12 @@ jobs:
       - name: Upload Linux bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          # deb 与独立 AppImage 不参与更新通道，其 .sig 不上传
+          # deb 不参与更新通道（其 .sig 不上传）；AppImage 既是独立下载也是更新包，.sig 需要上传
           name: amax-linux-${{ github.run_id }}
           path: |
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
-            target/release/bundle/appimage/*.AppImage.tar.gz
-            target/release/bundle/appimage/*.AppImage.tar.gz.sig
+            target/release/bundle/appimage/*.AppImage.sig
           if-no-files-found: error
 
   # 两个平台构建完成后合并产物、生成清单并发布；核验步骤都对着线上资产反查。
@@ -253,8 +254,7 @@ jobs:
             dist-artifacts/*.msi.sig
             dist-artifacts/*.deb
             dist-artifacts/*.AppImage
-            dist-artifacts/*.AppImage.tar.gz
-            dist-artifacts/*.AppImage.tar.gz.sig
+            dist-artifacts/*.AppImage.sig
             dist-artifacts/latest.json
           body_path: release-notes.md
           draft: false

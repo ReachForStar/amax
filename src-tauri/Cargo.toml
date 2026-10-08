@@ -28,10 +28,6 @@ chrono = "0.4"
 rusqlite = { version = "0.34", features = ["bundled"] }
 # Linux 凭据加密（AES-256-GCM）：与 lettre/reqwest 的 rustls 后端共用 ring，不引入第二种加密实现
 ring = "0.17"
-
-# DPAPI 加解密仅 Windows 需要（crypto.rs）
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }
 # lettre 只用同步 SMTP：rustls + ring 与 reqwest 共用同一份加密后端（不引入 aws-lc 第二 provider）；
 # 根证书走系统信任库（rustls-native-certs）而非 webpki-roots，国内邮件服务商证书链常挂在
 # Windows 自动更新的根集合里，用 Mozilla 内置集合会误判成不受信
@@ -39,3 +35,7 @@ lettre = { version = "0.11", default-features = false, features = ["builder", "s
 # MeoW 端点把昵称与标题拼进路径段，须百分号编码（`/`、`#`、中文都会改写路由）；
 # url 已在依赖树内（tauri 自身依赖），显式声明不增加体积
 url = "2"
+
+# DPAPI 加解密仅 Windows 需要（crypto.rs）
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Security_Cryptography", "Win32_Foundation"] }

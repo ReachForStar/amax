@@ -1,8 +1,8 @@
 // 生成应用内自动更新的版本清单 latest.json。
 //
 // cargo tauri build 不产出清单（只有 tauri-action 会），所以由这里手工组装，并做两道校验：
-// 1. 每个平台的产物各恰好一份（Windows 固定取 zh-CN MSI，Linux 取 AppImage 的 .tar.gz 更新包；
-//    deb 无更新产物，客户端提示手动升级）；
+// 1. 每个平台的产物各恰好一份（Windows 固定取 zh-CN MSI，Linux 取原始 AppImage——createUpdaterArtifacts: true
+//    的 v2 风格下更新包就是原始安装包本身，.tar.gz 只在 v1 兼容模式产出；deb 不进更新通道，客户端提示手动升级）；
 // 2. 每个 .sig 与 tauri.conf.json 的 pubkey 是同一对密钥（比对 minisign 文本块里的密钥 id）。
 //    tauri build 遇到密钥不匹配只打日志，客户端却会在下载后验签失败，所以这里失败而非告警。
 //
@@ -67,9 +67,9 @@ const keyIdOf = (encoded) => {
 };
 
 const winMsi = pickOne(`_${version}_x64_zh-CN.msi`, 'Windows MSI');
-const linuxTgz = pickOne(`_${version}_amd64.AppImage.tar.gz`, 'Linux AppImage 更新包');
+const linuxAppImage = pickOne(`_${version}_amd64.AppImage`, 'Linux AppImage 更新包');
 const winSig = readSignature(winMsi);
-const linuxSig = readSignature(linuxTgz);
+const linuxSig = readSignature(linuxAppImage);
 
 try {
   const pubKeyId = keyIdOf(conf.plugins.updater.pubkey);
@@ -94,7 +94,7 @@ const manifest = {
       signature: winSig,
     },
     'linux-x86_64': {
-      url: `${baseUrl}/${linuxTgz}`,
+      url: `${baseUrl}/${linuxAppImage}`,
       signature: linuxSig,
     },
   },
