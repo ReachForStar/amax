@@ -48,3 +48,5 @@
 ## [2026-10-08] fix | 沉淀登录窗口代理挂起查询页：根因、修复、验证与「已登录即关窗」测试陷阱
 
 ## [2026-10-08] fix | 重建含登录修复的 deb/AppImage：签名须显式传空口令环境变量；核验与冒烟通过；线上 v0.2.6 只含 Windows MSI
+
+## [2026-10-08] query | 定位 CI checkout 警告根因：误提交的 .claude worktree gitlink（无 .gitmodules），清理待定
