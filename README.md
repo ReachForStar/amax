@@ -1,6 +1,6 @@
 # AMAX Dashboard
 
-`ai.amaxsmp.com` 账户用量看板的**双端原生实现**：Windows 桌面端（Tauri 2 + 无框架前端）与 HarmonyOS 端（ArkTS / ArkUI，Stage 模型）。两端共享同一套数据口径与官网接口约定，不做云同步。
+`ai.amaxsmp.com` 账户用量看板的**双端原生实现**：Windows / Linux 桌面端（Tauri 2 + 无框架前端）与 HarmonyOS 端（ArkTS / ArkUI，Stage 模型）。两端共享同一套数据口径与官网接口约定，不做云同步。
 
 - 桌面端仓库根即项目根：Rust 后端 `src-tauri/`，静态前端 `dist/`（无 Node.js 构建步骤）。
 - HarmonyOS 端在 `harmony/`，开发命令与结构见 [`harmony/README.md`](harmony/README.md)。
@@ -15,17 +15,22 @@
 | 数据导出 | 桌面端 CSV / JSON / XLSX；手机端 CSV / JSON（字段口径与桌面端一致） |
 | 官网登录取凭据 | 应用内 WebView 打开官网登录页，自动提取整串 Session Cookie（含 HTTP-only），手动粘贴保留为兜底 |
 | 托盘与后台刷新 | 关闭/最小化即隐藏到托盘；每 10 分钟后台刷新；托盘菜单可刷新/恢复窗口/检查更新/退出 |
-| 自动更新 | 启动 15 秒后首查、之后每 24 小时一查，发现新版本立即下载验签；主窗口隐藏/最小化或连续 90 秒无操作且后台刷新不在飞行中时才安装并重启，设置页可手动检查或「现在重启并安装」 |
-| 额度告警 | 桌面端三条规则：剩余额度低于阈值、按近 7 日日均算出的耗尽天数进入阈值、当日花费达到近 7 日中位数的指定倍数（后台与托盘刷新时评估）；阈值与每日最多通知次数存于本机配置，默认 10% / 5 天 / 3× / 2 次，在设置页「告警规则」区逐条开关与调参（右上角显示今日已通知次数 / 上限，随 `alert://status` 刷新）；同一规则同日只通知一次且重启不重复。投递渠道为系统通知 / MeoW 推送 / SMTP 邮件（QQ 邮箱授权码），在设置页「通知渠道」区勾选与填写，可逐渠道测试投递并查看当日投递记录；MeoW 昵称按明文配置保存、界面原样回显，QQ 邮箱授权码按 DPAPI 绑定本机当前用户保存、界面只给「是否已配」。手机端现已对齐桌面端三规则引擎（Alert/Deliver/Alerts/AlertPanel），投递渠道为系统通知 + MeoW 推送（无 SMTP）。 |
+| 自动更新 | 启动 15 秒后首查、之后每 24 小时一查，发现新版本立即下载验签；主窗口隐藏/最小化或连续 90 秒无操作且后台刷新不在飞行中时才安装并重启，设置页可手动检查或「现在重启并安装」；Linux 的 AppImage 走同一套自更新，deb 安装只提示到 GitHub Releases 手动下载新包 |
+| 额度告警 | 桌面端三条规则：剩余额度低于阈值、按近 7 日日均算出的耗尽天数进入阈值、当日花费达到近 7 日中位数的指定倍数（后台与托盘刷新时评估）；阈值与每日最多通知次数存于本机配置，默认 10% / 5 天 / 3× / 2 次，在设置页「告警规则」区逐条开关与调参（右上角显示今日已通知次数 / 上限，随 `alert://status` 刷新）；同一规则同日只通知一次且重启不重复。投递渠道为系统通知 / MeoW 推送 / SMTP 邮件（QQ 邮箱授权码），在设置页「通知渠道」区勾选与填写，可逐渠道测试投递并查看当日投递记录；MeoW 昵称按明文配置保存、界面原样回显，QQ 邮箱授权码按本机加密保存（Windows DPAPI / Linux 本机密钥文件）、界面只给「是否已配」。手机端现已对齐桌面端三规则引擎（Alert/Deliver/Alerts/AlertPanel），投递渠道为系统通知 + MeoW 推送（无 SMTP）。 |
 | 失效引导 | 凭据失效时回到配置页并直接指向登录入口；桌面端后台刷新撞上失效会主动广播引导重登 |
 
 ## 快速开始（桌面端）
 
-环境：Windows 10/11、Rust stable（crate 用 edition 2024，本地实测 1.98.1；依赖树已不接受 1.88，`notify-rust` 4.18 声明 `rust-version = 1.89`）、`tauri-cli` 2.x（本地实测 2.11.5，release CI 固定同版本）、WebView2。前端测试需要 Node.js（CI 用 22，仅跑 `node:test`，不参与构建）。
+环境：Windows 10/11（WebView2）或 Linux（Ubuntu 22.04+ 及同类发行版，WebKitGTK 4.1）；Rust stable（crate 用 edition 2024，本地实测 1.98.1；依赖树已不接受 1.88，`notify-rust` 4.18 声明 `rust-version = 1.89`）、`tauri-cli` 2.x（本地实测 2.11.5，release CI 固定同版本）。前端测试需要 Node.js（CI 用 22，仅跑 `node:test`，不参与构建）。
+
+```bash
+# Linux 首次构建先装系统依赖（Debian 系；Windows 无需）
+sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
 
 ```bash
 cargo tauri dev            # 开发运行，Rust 改动自动重编译
-cargo tauri build          # 产出 Windows MSI（WiX 含 zh-CN / en-US 两种语言）
+cargo tauri build          # 按平台出包：Windows 为 MSI（WiX 含 zh-CN / en-US），Linux 为 deb + AppImage
 ```
 
 ```bash
@@ -43,12 +48,12 @@ node tests/frontend-navigation.test.js      # 前端逻辑回归（node:test + v
 ## 认证与数据口径
 
 - 唯一必需的凭据是官网的 **Session Cookie**（请求头整串）。API Key 仅作历史兼容保留，不参与任何请求。
-- 桌面端用 Windows DPAPI 把 Cookie/API Key 绑定当前用户 + 当前机器，落库格式 `dpapi:v1:<hex>`；手机端用 HUKS AES-256-GCM，格式 `huks:v1:<base64(iv|密文|tag)>`。**两者产物不可跨设备迁移，项目也不做跨设备凭据同步。**
+- 桌面端把 Cookie/API Key 绑定本机加密保存：Windows 用 DPAPI（`dpapi:v1:<hex>`，绑定当前用户与当前机器，数据目录搬到别的设备后无法解密、需重新登录）；Linux 用本机密钥文件 + AES-256-GCM（`aes:v1:<hex>`，密钥文件 `secret.key` 与数据库同目录、权限 0600）。两端密文格式互不通用；手机端用 HUKS AES-256-GCM（`huks:v1:<base64(iv|密文|tag)>`）。**项目不做跨设备凭据同步。**
 - 数据来自两个官网接口：`/api/user/self`（额度、用户 ID、累计请求数）与 `POST /v1/logs/token-usage/by-model`（当日/区间的 Token 与 quota 聚合，必须携带字符串形式 `user_id`）。
 - 桌面端官网数据请求使用独立的直连 HTTP 客户端，不受系统代理设置影响；MeoW 投递使用另一客户端，保留系统网络配置。
 - 费用换算 `QUOTA_PER_YUAN = 500_000`，即 `费用(元) = quota / 500000`。
 - Cookie **不设本地过期时间**，失效一律由服务端判定（返回认证错误）。配置页展示的有效期是官网真实下发值，**只做展示**，不参与任何倒计时或拦截；官网未下发时明示"失效由服务端判定"。
-- 本地数据：`%APPDATA%\com.amax.dashboard\amax_dashboard.db`（SQLite）。`config` 存凭据与 `cookie_expires_at`，`dashboard_snapshot` 存每次刷新的快照（含累计 `request_count`，永久保留不清理，旧库自动幂等迁移）。
+- 本地数据（SQLite）：Windows 位于 `%APPDATA%\com.amax.dashboard\amax_dashboard.db`，Linux 位于 `~/.local/share/com.amax.dashboard/amax_dashboard.db`（XDG 应用数据目录）。`config` 存凭据与 `cookie_expires_at`，`dashboard_snapshot` 存每次刷新的快照（含累计 `request_count`，永久保留不清理，旧库自动幂等迁移）。
 
 ## 架构概览
 
@@ -58,36 +63,37 @@ src-tauri/src/
   lib.rs         应用编排：command 注册、共享状态、托盘、定时刷新、自动更新下载/空闲安装、快照落库
   api.rs         HTTP 聚合：两个官网接口 + 状态码分级（status_error）
   db.rs          SQLite：config / dashboard_snapshot
-  crypto.rs      Windows DPAPI 加解密
+  crypto.rs      凭据加解密：Windows DPAPI / Linux AES-256-GCM + 本机密钥文件
   error.rs       AppError{code,message}，IPC 错误契约
   login.rs       官网 WebView 登录窗与 Cookie 提取
 ```
 
 前端通过 `window.__TAURI__` 调用十五个 IPC command（`get_config` / `save_config` / `fetch_dashboard` / `get_local_stats` / `fetch_usage_stats` / `open_login_window` / `get_app_version` / `report_user_activity` / `check_for_updates_now` / `apply_update_now` / `get_alert_settings` / `set_alert_settings` / `get_alert_channels` / `set_alert_channels` / `test_alert_channel`），后端经 `dashboard-updated`、`login://success|cancelled|timeout`、`auth://expired`、`update://status`、`alert://status` 事件回推。CSP 的 `connect-src` 只允许 Tauri IPC，HTTP 请求一律由 Rust 侧 reqwest 发起，前端不直连官网（MeoW 与 SMTP 同理，都由后端发出）。
 
-自动更新的"什么时候装"由 Rust 侧单点判定：`report_user_activity` 只是前端活动的心跳（节流 5 秒），空闲阈值 90 秒这个常量只存在于 `lib.rs`，就绪文案随 `update://status` 一起下发，前端不复制一份。`update()` 在 Windows 上拉起 msiexec 后立即 `exit(0)`，所以下载与安装必须分成两段——先备好包再等时机，而不是检测到就装。
+自动更新的"什么时候装"由 Rust 侧单点判定：`report_user_activity` 只是前端活动的心跳（节流 5 秒），空闲阈值 90 秒这个常量只存在于 `lib.rs`，就绪文案随 `update://status` 一起下发，前端不复制一份。`update()` 在 Windows 上拉起 msiexec 后立即 `exit(0)`；Linux 的 AppImage 安装是替换文件本身、正常返回，由应用随即从 `APPIMAGE` 路径拉起新版本；deb 安装则不发下载、只提示手动升级（`manual` 状态）。所以下载与安装必须分成两段——先备好包再等时机，而不是检测到就装。
 
 所有 command 的错误统一序列化为 `{ code, message }`，`code ∈ auth | network | data | input | storage`，前端按 `code` 分支而非匹配文案。
 
 ## CI 与发布
 
-三个文件，检查命令只在 action 里写一份：
+三个工作流文件加三个发布脚本，检查命令只在 action 里写一份：
 
 | 文件 | 触发 | 做什么 |
 |---|---|---|
-| `.github/actions/verify/action.yml` | 被两个工作流调用 | `cargo fmt --check` → `clippy -D warnings` → `cargo test` → `node --check dist/app.js` → `node tests/frontend-navigation.test.js` |
-| `.github/workflows/test.yml` | push 到 master、PR、手动 | 在 `windows-latest` 跑上面那份检查；`paths-ignore` 跳过纯文档与纯 `harmony/` 改动；同分支旧任务自动取消 |
-| `.github/workflows/release.yml` | 推送 `v*` 标签、手动 | 先跑同一份检查，再 `cargo tauri build` 出 MSI 并发布 GitHub Release |
+| `.github/actions/verify/action.yml` | 被两个工作流调用 | Linux 先装系统依赖（webkit2gtk 等），再 `cargo fmt --check` → `clippy -D warnings` → `cargo test` → `node --check dist/app.js` → `node tests/frontend-navigation.test.js` |
+| `.github/workflows/test.yml` | push 到 master、PR、手动 | 在 `windows-latest` 与 `ubuntu-22.04` 两个作业跑上面那份检查；`paths-ignore` 跳过纯文档与纯 `harmony/` 改动；同分支旧任务自动取消 |
+| `.github/workflows/release.yml` | 推送 `v*` 标签、手动 | `guard` 先校验标签与版本，再双平台并行构建（Windows MSI / Linux deb + AppImage），最后由 `publish` 作业合并产物、生成更新清单并发布 GitHub Release |
 
-发布构建后运行 `scripts/verify-desktop-bundle.ps1`，核对程序版本、告警功能内容与两个 MSI 的 `ProductVersion`。
+发布构建后按平台运行核验脚本：`scripts/verify-desktop-bundle.ps1`（Windows，核对程序版本、告警功能内容与两个 MSI 的 `ProductVersion`）与 `scripts/verify-desktop-bundle.sh`（Linux，核对 deb / AppImage 的程序版本与内容、tag 构建的更新签名）。
 
-- 两个工作流都只能在 `windows-latest` 上跑：应用依赖 DPAPI / `windows-sys`，非 Windows 构建下 `crypto.rs` 的加解密一律返回 `Err`，跑不到真实路径。私有仓库的 Windows 分钟数按 2 倍计费，这是 `paths-ignore` 与 `concurrency` 存在的原因。
-- 发布门槛：标签号必须与 `src-tauri/tauri.conf.json` 的 `version` 一致，否则工作流直接失败（MSI 文件名会与 Release 标题对不上）；`Cargo.toml` 的 `version` 只用于 crate，不参与校验。
-- Release Notes 取自 `CHANGELOG.md` 中同版本小节，**发布前须先补该小节**；缺失只告警并回退为上一标签以来的提交列表（该回退依赖 `fetch-depth: 0`）。
-- `workflow_dispatch` 手动跑发布工作流只验证构建链路，不创建 Release，MSI 改为上传为 artifact。
-- **自动更新通道由发布流程负责补齐**：`tauri.conf.json` 需 `"bundle": { "createUpdaterArtifacts": true }`（否则不产 `.sig`）；`latest.json` 由 `release.yml` 的「Generate updater manifest」步骤手写生成（`cargo tauri build` 从不产出清单，只有 `tauri-action` 会）。更新包取 `bundle/msi/` 里唯一的 `*_x64_zh-CN.msi`，**且必须先把它名字里的空格改成点**：bundler 按 `productName`（`"AMAX Dashboard"`）原样命名，而 GitHub 建资产时会把空格换成点，清单若按磁盘名转义成 `%20` 则上线即 404（v0.2.3 首发就踩了这个）。发布末尾还有一步用线上资产反查清单的 url 与签名两项——清单签名必须取自线上那份 MSI 的 `.sig`，手工用本地重建的清单整份覆盖会把签名换成另一构建产物的（CI 与本地 MSI 字节不同），url 通了客户端却验签失败。标签构建在缺 `TAURI_SIGNING_PRIVATE_KEY`、缺 `.sig`、或 `.sig` 的密钥 id 与 `plugins.updater.pubkey` 不一致时一律失败，不再静默发一个更新坏掉的版本。**更新端点必须匿名可读**：updater 插件的配置里没有任何凭据字段，运行时发的是匿名请求，而 GitHub 对私有仓库的未认证下载请求返回 404，客户端只会报 `Could not fetch a valid release JSON from the remote`——所以本仓库须保持 public，改回 private 等于关掉自动更新；发布 CI 末尾会不带凭据地探测该端点与更新包（清单非 200、或包取不到 200/206 即判失败）。
-- `plugins.updater.pubkey` 填的是 `cargo tauri signer generate` 产出的 **`.pub` 文件内容原样**（那个文件本身就已经是 minisign 公钥文本块的 base64，不需要再编码一次）；裸 32 字节公钥解析不了，表现为构建期 `failed to decode pubkey`。换密钥必须成对换：私钥文件内容进仓库 secret `TAURI_SIGNING_PRIVATE_KEY`，`.pub` 内容进配置——只换一边会在「Generate updater manifest」步骤被 keyid 比对拦下。本仓库的私钥在 `.tauri/amax.key`（gitignored，勿提交）。
-- `tauri-cli` 版本固定在 `release.yml` 的 `TAURI_CLI_VERSION`，并据此缓存 `~/.cargo/bin/cargo-tauri.exe`；升级 CLI 时版本与缓存键要一起改，否则缓存会命中旧二进制。
+- 两个工作流都在两个平台上跑：凭据加密有两套真实实现（Windows DPAPI / Linux AES-256-GCM），两端都要在真实路径上验证。Linux 固定在 `ubuntu-22.04`：发布产物的 glibc 兼容下限即构建机的 glibc，24.04 上编译的二进制在 22.04 用户机器上跑不起来。`paths-ignore` 与 `concurrency` 用于省构建时间（跳过纯文档 / 纯 `harmony/` 改动、同分支旧任务自动取消）。
+- 发布门槛：标签号必须与 `src-tauri/tauri.conf.json` 的 `version` 一致，否则 `guard` 作业直接失败（安装包名会与 Release 标题对不上）；`Cargo.toml` 的 `version` 只用于 crate，不参与校验。
+- Release Notes 取自 `CHANGELOG.md` 中同版本小节（`scripts/release-notes.mjs`），**发布前须先补该小节**；缺失只告警并回退为上一标签以来的提交列表（该回退依赖 `fetch-depth: 0`）。
+- `workflow_dispatch` 手动跑发布工作流只验证双平台构建链路，不创建 Release，安装包改为上传为 artifact。
+- **自动更新通道由发布流程负责补齐**：`tauri.conf.json` 需 `"bundle": { "createUpdaterArtifacts": true }`（否则不产 `.sig`）；`latest.json` 由 `publish` 作业用 `scripts/generate-updater-manifest.mjs` 生成（`cargo tauri build` 从不产出清单，只有 `tauri-action` 会），含两个平台键——`windows-x86_64` 取 zh-CN MSI，`linux-x86_64` 取 AppImage 的 `.tar.gz` 更新包（deb 没有更新产物，应用内只提示手动升级）。生成前先**把所有产物名里的空格改成点**：bundler 按 `productName`（`"AMAX Dashboard"`）原样命名，而 GitHub 建资产时会把空格换成点，清单若按磁盘名转义成 `%20` 则上线即 404（v0.2.3 首发就踩了这个）。发布末尾两步拿线上资产反查清单：url 与签名逐平台比对——清单签名必须取自线上那份包的 `.sig`，手工用本地重建的清单整份覆盖会把签名换成另一构建产物的（CI 与本地构建字节不同），url 通了客户端却验签失败；再用 `curl` 不带凭据探测更新端点与两个平台的更新包（`gh` 会带 token 假绿，清单非 200、缺 url/signature、或包取不到 200/206 即判失败）。标签构建在缺 `TAURI_SIGNING_PRIVATE_KEY`、缺 `.sig`、或 `.sig` 的密钥 id 与 `plugins.updater.pubkey` 不一致时一律失败，不再静默发一个更新坏掉的版本。**更新端点必须匿名可读**：updater 插件的配置里没有任何凭据字段，运行时发的是匿名请求，而 GitHub 对私有仓库的未认证下载请求返回 404，客户端只会报 `Could not fetch a valid release JSON from the remote`——所以本仓库须保持 public，改回 private 等于关掉自动更新。
+- `plugins.updater.pubkey` 填的是 `cargo tauri signer generate` 产出的 **`.pub` 文件内容原样**（那个文件本身就已经是 minisign 公钥文本块的 base64，不需要再编码一次）；裸 32 字节公钥解析不了，表现为构建期 `failed to decode pubkey`。换密钥必须成对换：私钥文件内容进仓库 secret `TAURI_SIGNING_PRIVATE_KEY`，`.pub` 内容进配置——只换一边会在生成更新清单时被 keyid 比对拦下。本仓库的私钥在 `.tauri/amax.key`（gitignored，勿提交）。
+- **Linux 自动更新只覆盖 AppImage**：updater 在 deb 安装下会用 `pkexec dpkg -i` 替换系统包（弹提权窗口），本项目有意让 deb 走「提示新版本 + 手动下载」的 `manual` 状态，免去提权交互与半自动升级的失败面；AppImage 由 updater 替换文件后，应用从 `APPIMAGE` 路径自行拉起新版本。Windows 行为不变（MSI 验签后空闲安装）。
+- `tauri-cli` 版本固定在 `release.yml` 的 `TAURI_CLI_VERSION`，并据此缓存 `cargo-tauri`（两个平台各自的缓存键，Windows 下为 `cargo-tauri.exe`）；升级 CLI 时版本与缓存键要一起改，否则缓存会命中旧二进制。
 - **HarmonyOS 端不在 CI 内**：hvigor / DevEco 工具链装不上 GitHub 托管 runner。改动 `harmony/` 后请本地跑 `hvigorw test -p testType=LocalTest` 与 `devecocli build`（见 [`harmony/README.md`](harmony/README.md)）。
 
 ## 第三方资源

@@ -1,18 +1,26 @@
-# Release 工作流：推送 v* 标签时在 Windows 上构建 MSI 并发布到 GitHub Release。
-# workflow_dispatch 用于手动验证构建链路（不创建 Release，产物改为上传 artifact）。
+# Release 工作流：推送 v* 标签时在 Windows 与 Linux 上分别构建安装包，
+# 合并发布为一个 GitHub Release（含两平台的应用内自动更新清单 latest.json）。
+# workflow_dispatch 用于手动验证双平台构建链路（不创建 Release，产物上传为 artifact）。
 #
 # 说明：
-# - 应用依赖 Windows DPAPI / windows-sys，仅 windows-latest 可构建，产物为 MSI。
-# - 发布前先跑与 test.yml 同一份检查（.github/actions/verify），避免“测试已挂仍发版”。
-# - 标签号必须与 src-tauri/tauri.conf.json 的 version 一致，否则直接失败：
-#   MSI 文件名与 Release 标题会对不上。Cargo.toml 的 version 只用于 crate，不影响产物。
+# - 应用依赖 Windows DPAPI / windows-sys 与 Linux webkit2gtk 等系统包，构建必须在
+#   对应 runner 上进行；两个构建作业都先跑与 test.yml 同一份检查（.github/actions/verify）。
+# - Linux 固定 ubuntu-22.04：发布产物的 glibc 兼容下限即构建机的 glibc，
+#   24.04 上编译的二进制在 22.04 用户机器上跑不起来。
+# - 标签号必须与 src-tauri/tauri.conf.json 的 version 一致，否则 guard 作业直接失败
+#   （安装包文件名与 Release 标题会对不上）。Cargo.toml 的 version 只用于 crate，不影响产物。
 # - CHANGELOG.md 缺对应小节只告警不失败（回退为提交列表是既定行为）。
-# - wix 配置了 zh-CN / en-US 两种语言，会各生成一个 MSI，glob 一并上传。
-# - 自动更新要求 bundle.createUpdaterArtifacts = true（生成 .sig），且
-#   latest.json 由本工作流手写：cargo tauri build 不产出清单（只有 tauri-action 会），
-#   清单缺失或不匹配会让应用内更新静默失效，所以下面几道校验一律失败而非告警。
+# - 发布产物：Windows 两个 MSI（zh-CN / en-US）+ 各自 .sig；Linux 一个 deb（手动升级）+
+#   AppImage（独立下载）+ AppImage.tar.gz（AppImage 的更新包）+ .sig。
+# - 自动更新要求 bundle.createUpdaterArtifacts = true（生成 .sig），latest.json 由
+#   scripts/generate-updater-manifest.mjs 手工生成（cargo tauri build 不产出清单）。
+#   清单缺失、签名与公钥不匹配、端点匿名不可读，都会让应用内更新静默失效，
+#   所以下面几道校验一律失败而非告警。
 # - 构建产物位于工作区根 target/（Cargo workspace 根在仓库根目录）。
 # - checkout 必须 fetch-depth: 0：回退逻辑要用 git describe 找上一个标签，浅克隆下取不到。
+# - 产物名在打包后先规范成点形式：bundler 按 productName（"AMAX Dashboard"）原样命名，
+#   而 GitHub 建 Release 资产时把空格换成点；改名后磁盘名、资产名、清单 url 三者恒等
+#   （v0.2.3 首发曾按磁盘名转义成 %20，清单 url 直接 404）。
 name: Release
 
 on:
@@ -26,39 +34,46 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # 升级 tauri-cli 时这里与两个构建作业的缓存键一起改；版本浮动会让缓存命中错误的二进制。
+  TAURI_CLI_VERSION: '2.11.5'
+
 jobs:
-  build:
+  # 发布门槛先于一切构建：标签与配置版本不一致时，别浪费两个平台的构建时间。
+  guard:
+    name: Guard tag and changelog
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Verify tag matches app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: node scripts/release-notes.mjs "${GITHUB_REF_NAME#v}" --check
+
+  build-windows:
     name: Build Windows MSI
+    needs: guard
     runs-on: windows-latest
     permissions:
-      contents: write
-    env:
-      # 升级 tauri-cli 时这里与下面的缓存键一起改；版本浮动会让缓存命中错误的二进制。
-      TAURI_CLI_VERSION: '2.11.5'
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # 检查集内已含 Setup Node（release-notes / 核验脚本共用），后续步骤可直接用 node。
       - name: Run checks
         uses: ./.github/actions/verify
-
-      - name: Verify tag matches app version
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $version = $tag -replace '^v', ''
-          $conf = Get-Content src-tauri/tauri.conf.json -Raw -Encoding utf8 | ConvertFrom-Json
-          if ($conf.version -ne $version) {
-            Write-Output "::error::标签 $tag 与 src-tauri/tauri.conf.json 的 version=$($conf.version) 不一致"
-            exit 1
-          }
-          $pattern = "^## \[$([regex]::Escape($version))\]"
-          if (-not (Select-String -Path CHANGELOG.md -Pattern $pattern -Quiet)) {
-            Write-Output "::warning::CHANGELOG.md 缺少 [$version] 小节，Release Notes 将回退为提交列表"
-          }
 
       - name: Cache tauri-cli binary
         id: tauri_cli_cache
@@ -89,6 +104,13 @@ jobs:
           }
           cargo tauri build
 
+      - name: Normalize bundle file names
+        shell: pwsh
+        run: |
+          Get-ChildItem target/release/bundle/msi -File | Where-Object { $_.Name -cmatch ' ' } | ForEach-Object {
+            Rename-Item -LiteralPath $_.FullName -NewName ($_.Name -replace ' ', '.')
+          }
+
       - name: Verify desktop bundle contents
         shell: pwsh
         run: |
@@ -103,170 +125,217 @@ jobs:
         shell: pwsh
         run: Get-ChildItem -Recurse target\release\bundle -ErrorAction SilentlyContinue | Select-Object FullName
 
-      - name: Generate updater manifest
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $version = "${{ github.ref_name }}" -replace '^v', ''
-          $conf = Get-Content src-tauri/tauri.conf.json -Raw -Encoding utf8 | ConvertFrom-Json
-          # 清单每个平台只能给一个包，双语 MSI 固定取 zh-CN 作为更新通道。
-          # 先把产物名里的空格规范成点：tauri-bundler 用 productName 原样命名
-          # （"AMAX Dashboard" 带空格），而 GitHub 建 Release 资产时会把空格换成点，
-          # 于是本地叫 "AMAX Dashboard_*.msi" 的文件线上变成 "AMAX.Dashboard_*.msi"。
-          # 不预先改名就只能猜平台侧的改写规则——v0.2.3 首发就猜错成 %20，清单 url 直接 404。
-          # 改名后磁盘名、资产名、清单 url 三者恒等，Create Release 的 glob 也照常命中。
-          Get-ChildItem "target/release/bundle/msi" -File | Where-Object { $_.Name -cmatch ' ' } | ForEach-Object {
-            Rename-Item -LiteralPath $_.FullName -NewName ($_.Name -replace ' ', '.')
-          }
-          $msiFiles = @(Get-ChildItem "target/release/bundle/msi" -Filter '*_x64_zh-CN.msi' -File)
-          if ($msiFiles.Count -ne 1) {
-            Write-Output "::error::期望恰好 1 个 zh-CN MSI，实际 $($msiFiles.Count) 个：$($msiFiles.Name -join ', ')"
-            exit 1
-          }
-          $msi = $msiFiles[0]
-          $msiName = $msi.Name
-          if ($msiName -cmatch ' ') { Write-Output "::error::资产名仍含空格（$msiName），清单 url 会与线上资产名不一致"; exit 1 }
-          $sig = "$($msi.FullName).sig"
-          if (-not (Test-Path $sig)) {
-            Write-Output "::error::缺少 $msiName.sig：本次构建未签名（私钥缺失或无效），发布后客户端自动更新必然失败"
-            exit 1
-          }
-          # pubkey 与 .sig 都是「base64(minisign 文本块)」，第 2 行的第 3~10 字节是密钥 id。
-          # tauri build 遇到 id 不匹配只 log::warn，客户端侧表现为“下载后验签失败”，这里改成发版失败。
-          function Get-Keyid([string]$encoded) {
-            $block = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded.Trim()))
-            $bin = [Convert]::FromBase64String(($block -split '\r?\n')[1])
-            [BitConverter]::ToString($bin[2..9])
-          }
-          try {
-            $pubKeyId = Get-Keyid $conf.plugins.updater.pubkey
-            $sigKeyId = Get-Keyid (Get-Content $sig -Raw)
-          } catch {
-            Write-Output "::error::tauri.conf.json 的 pubkey 或 $sig 不是合法的 minisign 文本块：$($_.Exception.Message)"
-            exit 1
-          }
-          if ($pubKeyId -ne $sigKeyId) {
-            Write-Output "::error::签名密钥 id ($sigKeyId) 与 pubkey 的 ($pubKeyId) 不一致：私钥与配置里的公钥不是同一对，请成对更新"
-            exit 1
-          }
-          $manifest = [ordered]@{
-            version  = $version
-            pub_date = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-            platforms = [ordered]@{
-              'windows-x86_64' = [ordered]@{
-                url = "https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/$msiName"
-                # .sig 内容已是签名文本块的 base64，清单原样引用
-                signature = (Get-Content $sig -Raw).Trim()
-              }
-            }
-          }
-          $manifest | ConvertTo-Json -Depth 4 | Set-Content target/release/bundle/latest.json -Encoding utf8NoBOM
-          Get-Content target/release/bundle/latest.json
-
-      - name: Upload MSI artifact (manual run only)
-        if: github.event_name == 'workflow_dispatch'
+      - name: Upload Windows bundle artifact
         uses: actions/upload-artifact@v4
         with:
-          name: amax-msi-${{ github.run_id }}
-          path: target/release/bundle/msi/*.msi
-          if-no-files-found: error
-
-      - name: Extract release notes
-        if: startsWith(github.ref, 'refs/tags/')
-        id: release_notes
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $version = $tag -replace '^v', ''
-          $body = ""
-          if (Test-Path CHANGELOG.md) {
-            $content = Get-Content CHANGELOG.md -Raw -Encoding utf8
-            $pattern = "(?ms)^## \[$([regex]::Escape($version))\][^\r\n]*\r?\n(.*?)(?=^## \[|\z)"
-            $m = [regex]::Match($content, $pattern)
-            if ($m.Success) { $body = $m.Groups[1].Value.Trim() }
-          }
-          if (-not $body) {
-            # CHANGELOG.md 缺少对应小节时回退为上一标签以来的提交列表（需 fetch-depth: 0）
-            $prev = git describe --tags --abbrev=0 "$tag^" 2>$null
-            $range = if ($prev) { "$prev..$tag" } else { $tag }
-            $commits = git log $range --pretty=format:"- %s"
-            $body = "## 修改说明`n`n" + ($commits -join "`n")
-          }
-          "body<<NOTES_EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          $body | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "NOTES_EOF" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Create Release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          # msi 安装包 + updater 签名文件(.sig)与版本清单(latest.json，供应用内自动更新)
-          files: |
+          name: amax-windows-${{ github.run_id }}
+          path: |
             target/release/bundle/msi/*.msi
             target/release/bundle/msi/*.sig
-            target/release/bundle/latest.json
-          body: ${{ steps.release_notes.outputs.body }}
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Linux deb and AppImage
+    needs: guard
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 检查集内已含 Linux 系统依赖安装与 Setup Node，后续步骤可直接用 node。
+      - name: Run checks
+        uses: ./.github/actions/verify
+
+      - name: Cache tauri-cli binary
+        id: tauri_cli_cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: tauri-cli-${{ env.TAURI_CLI_VERSION }}-linux
+
+      - name: Install Tauri CLI
+        if: steps.tauri_cli_cache.outputs.cache-hit != 'true'
+        run: cargo install tauri-cli --locked --version "${{ env.TAURI_CLI_VERSION }}"
+
+      - name: Build Tauri app
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+              echo "::error::标签构建缺少 TAURI_SIGNING_PRIVATE_KEY：产物不会有 .sig，发布后所有客户端自动更新都会在下载后验签失败"
+              exit 1
+            fi
+            echo "::warning::未配置 TAURI_SIGNING_PRIVATE_KEY，本次手动构建不生成更新签名"
+          fi
+          cargo tauri build
+
+      - name: Normalize bundle file names
+        shell: bash
+        run: |
+          while IFS= read -r -d '' file; do
+            mv "$file" "${file// /.}"
+          done < <(find target/release/bundle/deb target/release/bundle/appimage -maxdepth 1 -type f -name '* *' -print0)
+
+      - name: Verify desktop bundle contents
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            bash scripts/verify-desktop-bundle.sh --require-signatures
+          else
+            bash scripts/verify-desktop-bundle.sh
+          fi
+
+      - name: List bundle output
+        if: always()
+        shell: bash
+        run: find target/release/bundle -type f | sort
+
+      - name: Upload Linux bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          # deb 与独立 AppImage 不参与更新通道，其 .sig 不上传
+          name: amax-linux-${{ github.run_id }}
+          path: |
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+            target/release/bundle/appimage/*.AppImage.tar.gz
+            target/release/bundle/appimage/*.AppImage.tar.gz.sig
+          if-no-files-found: error
+
+  # 两个平台构建完成后合并产物、生成清单并发布；核验步骤都对着线上资产反查。
+  publish:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Download bundle artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: amax-*
+          merge-multiple: true
+          path: dist-artifacts
+
+      - name: Generate updater manifest
+        shell: bash
+        run: |
+          node scripts/generate-updater-manifest.mjs "${GITHUB_REF_NAME#v}" dist-artifacts "${GITHUB_REPOSITORY}" "${GITHUB_REF_NAME}" dist-artifacts/latest.json
+
+      - name: Extract release notes
+        shell: bash
+        run: node scripts/release-notes.mjs "${GITHUB_REF_NAME#v}" > release-notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # 安装包 + 两个平台的更新签名(.sig)与版本清单(latest.json，供应用内自动更新)
+          files: |
+            dist-artifacts/*.msi
+            dist-artifacts/*.msi.sig
+            dist-artifacts/*.deb
+            dist-artifacts/*.AppImage
+            dist-artifacts/*.AppImage.tar.gz
+            dist-artifacts/*.AppImage.tar.gz.sig
+            dist-artifacts/latest.json
+          body_path: release-notes.md
           draft: false
           prerelease: false
 
-      # 发布完成后拿 GitHub 自己报的资产反查清单两处：
+      # 发布完成后拿 GitHub 自己报的资产反查清单两处（两个平台逐一过）：
       # url 不在真实资产里 → 客户端对着 404 下载地址做更新（v0.2.3 首发正是这样"成功"的）；
-      # signature 与线上那份 MSI 的 .sig 不一致 → 下载得到包但验签必失败（v0.2.3 手工修 url 时
-      # 顺手用本地重建的清单覆盖过线上签名，本地 MSI 与 CI MSI 字节不同，签名也就不同）。
+      # signature 与线上那份更新包的 .sig 不一致 → 下载得到包但验签必失败（v0.2.3 手工修 url 时
+      # 顺手用本地重建的清单覆盖过线上签名，本地与 CI 构建字节不同，签名也就不同）。
       # 这一步只看结论、不猜规则，任何一侧改名/改名清洗规则变化都会在这里暴露。
       - name: Verify updater manifest matches the published assets
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $ErrorActionPreference = 'Stop'
-          $rel = "repos/$env:GITHUB_REPOSITORY/releases/tags/${{ github.ref_name }}"
-          $assets = @(gh api $rel --jq '.assets[].browser_download_url')
-          if ($LASTEXITCODE -ne 0 -or -not $assets) { Write-Output "::error::读取 Release 资产列表失败"; exit 1 }
-          $plat = (Get-Content target/release/bundle/latest.json -Raw -Encoding utf8 | ConvertFrom-Json).platforms.'windows-x86_64'
-          if ($assets -notcontains $plat.url) {
-            Write-Output "::error::清单 url 指向的资产不存在，客户端更新会 404`n  清单: $($plat.url)`n  实际资产:`n$(($assets | ForEach-Object { "  - $_" }) -join "`n")"
+          set -euo pipefail
+          release="repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}"
+          mapfile -t assets < <(gh api "$release" --jq '.assets[].browser_download_url')
+          if [[ ${#assets[@]} -eq 0 ]]; then
+            echo "::error::读取 Release 资产列表失败"
             exit 1
-          }
-          $sigName = $plat.url.Split('/')[-1] + '.sig'
-          $sigId = gh api $rel --jq ".assets[] | select(.name==`"$sigName`") | .id"
-          if ($LASTEXITCODE -ne 0 -or -not $sigId) { Write-Output "::error::线上找不到 $sigName，无法校验清单签名"; exit 1 }
-          $onlineSig = ((gh api "repos/$env:GITHUB_REPOSITORY/releases/assets/$sigId" -H 'Accept: application/octet-stream') -join '').Trim()
-          if ($onlineSig -ne $plat.signature.Trim()) {
-            Write-Output "::error::清单签名与线上 $sigName 不一致，客户端下载后验签必然失败`n  清单: $($plat.signature.Substring(0, 32))...`n  线上: $($onlineSig.Substring(0, 32))..."
-            exit 1
-          }
-          Write-Output "清单 url 与签名均与线上资产一致：$($plat.url)"
+          fi
+          for key in windows-x86_64 linux-x86_64; do
+            url="$(jq -r --arg key "$key" '.platforms[$key].url' dist-artifacts/latest.json)"
+            signature="$(jq -r --arg key "$key" '.platforms[$key].signature' dist-artifacts/latest.json)"
+            if [[ ! " ${assets[*]} " == *" $url "* ]]; then
+              echo "::error::清单 $key 的 url 指向的资产不存在，客户端更新会 404"
+              printf '  清单: %s\n  实际资产:\n' "$url"
+              printf '  - %s\n' "${assets[@]}"
+              exit 1
+            fi
+            sig_name="$(basename "$url").sig"
+            # gh api 不支持 jq 的 --arg，直接插值（资产名来自清单 url，不含引号）
+            sig_id="$(gh api "$release" --jq ".assets[] | select(.name==\"$sig_name\") | .id")"
+            if [[ -z "$sig_id" ]]; then
+              echo "::error::线上找不到 $sig_name，无法校验清单签名"
+              exit 1
+            fi
+            online_sig="$(gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${sig_id}" -H 'Accept: application/octet-stream')"
+            if [[ "$online_sig" != "$signature" ]]; then
+              echo "::error::清单 $key 的签名与线上 $sig_name 不一致，客户端下载后验签必然失败"
+              exit 1
+            fi
+            echo "清单 $key 的 url 与签名均与线上资产一致：$url"
+          done
 
       # 客户端 updater 不带任何凭据（插件 Config 里根本没有凭据字段，见 src/config.rs），
       # 所以"能不能自动更新"等价于"这个端点匿名可不可读"。仓库被改回 private、清单被删、
       # 更新包改名，都会在这里变成失败，而不是等用户点「检查更新」才发现。
       - name: Verify updater endpoint is anonymously reachable
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: pwsh
+        shell: bash
         run: |
-          $ErrorActionPreference = 'Stop'
-          # 探测 tauri.conf.json 里的端点原值，不另写一个地址：安装包用的就是它
-          $endpoint = ((Get-Content src-tauri/tauri.conf.json -Raw -Encoding utf8 | ConvertFrom-Json).plugins.updater.endpoints)[0]
-          # 用 Invoke-WebRequest 而不是 gh：gh 会附带 token，私有仓库下探测会假绿
-          $resp = Invoke-WebRequest $endpoint -SkipHttpErrorCheck -TimeoutSec 60
-          $code = [int]$resp.StatusCode
-          if ($code -ne 200) {
-            Write-Output "::error::匿名访问更新端点得到 HTTP $code ：$endpoint`n  客户端 updater 不带凭据，仓库不是 public 或清单缺失时自动更新必然失败"
+          set -euo pipefail
+          endpoint="$(jq -r '.plugins.updater.endpoints[0]' src-tauri/tauri.conf.json)"
+          # 用 curl 而不是 gh：gh 会附带 token，私有仓库下探测会假绿
+          status="$(curl -sSL -o endpoint.json -w '%{http_code}' "$endpoint")"
+          if [[ "$status" != "200" ]]; then
+            echo "::error::匿名访问更新端点得到 HTTP $status ：$endpoint"
+            echo "  客户端 updater 不带凭据，仓库不是 public 或清单缺失时自动更新必然失败"
             exit 1
-          }
-          # Release 资产按 application/octet-stream 下发，此时 .Content 是 byte[]，必须先转文本再解 JSON
-          $text = if ($resp.Content -is [byte[]]) { [System.Text.Encoding]::UTF8.GetString($resp.Content) } else { [string]$resp.Content }
-          $manifest = $text | ConvertFrom-Json
-          $pkg = $manifest.platforms.'windows-x86_64'
-          if (-not $pkg.url -or -not $pkg.signature) { Write-Output "::error::端点返回的清单缺 url/signature，不是 updater 能用的清单"; exit 1 }
-          # 更新包本身也要匿名可下载（私有仓库的资产同样 404）；Range 只取首字节，不拉 7MB
-          $head = Invoke-WebRequest $pkg.url -Headers @{ Range = 'bytes=0-0' } -SkipHttpErrorCheck -TimeoutSec 120
-          $pkgCode = [int]$head.StatusCode
-          if ($pkgCode -ne 200 -and $pkgCode -ne 206) {
-            Write-Output "::error::清单指向的更新包匿名不可下载（HTTP $pkgCode）：$($pkg.url)"
+          fi
+          for key in windows-x86_64 linux-x86_64; do
+            if ! jq -e --arg key "$key" '.platforms[$key].url and .platforms[$key].signature' endpoint.json >/dev/null; then
+              echo "::error::端点返回的清单缺 $key 的 url/signature，不是 updater 能用的清单"
+              exit 1
+            fi
+          done
+          version="${GITHUB_REF_NAME#v}"
+          listed="$(jq -r '.version' endpoint.json)"
+          if [[ "$listed" != "$version" ]]; then
+            echo "::error::端点清单版本 $listed 与本次发布版本 $version 不一致（releases/latest 指向的不是本次标签？）"
             exit 1
-          }
-          Write-Output "匿名探测通过：$endpoint -> v$($manifest.version)，更新包 HTTP $pkgCode"
+          fi
+          # 两个平台的更新包都要匿名可下载；Range 只取首字节，不拉全量
+          for key in windows-x86_64 linux-x86_64; do
+            pkg="$(jq -r --arg key "$key" '.platforms[$key].url' endpoint.json)"
+            code="$(curl -sSL -o /dev/null -w '%{http_code}' -r 0-0 "$pkg")"
+            if [[ "$code" != "200" && "$code" != "206" ]]; then
+              echo "::error::清单 $key 指向的更新包匿名不可下载（HTTP $code）：$pkg"
+              exit 1
+            fi
+            echo "更新包匿名可下载（HTTP $code）：$pkg"
+          done
+          echo "匿名探测通过：$endpoint -> v$listed"

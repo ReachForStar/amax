@@ -634,8 +634,9 @@ testMeowBtn.addEventListener('click', () => testChannel('meow', testMeowBtn));
 testMailBtn.addEventListener('click', () => testChannel('mail', testMailBtn));
 
 // ═══ 自动更新 ═══
-// 后端只做「检查 → 下载 → 验签」，安装会直接结束本进程（msiexec 起新版本后自动拉起），
-// 所以安装时机由「后端空闲判定 + 这里的活动上报」共同决定，用户正在用时不会被打断。
+// 后端只做「检查 → 下载 → 验签」，安装会结束本进程并拉起新版本（Windows 走 msiexec，
+// Linux AppImage 替换文件后重启）；deb 安装进程无权改写自身，后端只推 manual 状态提示手动升级。
+// 安装时机由「后端空闲判定 + 这里的活动上报」共同决定，用户正在用时不会被打断。
 function renderUpdateStatus(status) {
   if (!status || !status.state) return;
   const { state, message } = status;
@@ -648,6 +649,7 @@ function renderUpdateStatus(status) {
     case 'up_to_date': updateStatusEl.textContent = '已是最新版本'; break;
     case 'downloading': updateStatusEl.textContent = `发现新版本${version}，正在后台下载并验签…`; break;
     case 'staged': updateStatusEl.textContent = message || `发现新版本${version}`; break;
+    case 'manual': updateStatusEl.textContent = message || `发现新版本${version}，请手动下载升级`; break;
     case 'installing': updateStatusEl.textContent = `正在安装${version}，应用即将重启…`; break;
     case 'disabled': updateStatusEl.textContent = message || '当前构建不检查更新'; break;
     default: updateStatusEl.textContent = `更新：${message || state}`;

@@ -43,8 +43,9 @@ pub struct AppState {
 /// 已下载并验签、等待空闲安装的更新。
 ///
 /// 分成「下载」与「安装」两步是必须的：Windows 侧 `Update::install` 拉起 msiexec 后
-/// 直接 `std::process::exit(0)`，正在用应用时调用等于当场杀掉进程，所以只能先下载好，
-/// 等无人使用再安装。
+/// 直接 `std::process::exit(0)`；Linux AppImage 侧替换当前 AppImage 文件后返回，
+/// 由 [`install_staged`] 拉起新版本。正在用应用时安装等于当场打断用户，
+/// 所以只能先下载好，等无人使用再安装。
 struct StagedUpdate {
     update: tauri_plugin_updater::Update,
     bytes: Vec<u8>,
@@ -806,7 +807,8 @@ fn show_notification(app: &tauri::AppHandle, title: &str, body: &str) {
 }
 
 /// 更新状态事件：设置页据此渲染版本状态行与「现在重启并安装」按钮。
-/// state ∈ disabled | checking | up_to_date | downloading | staged | installing | error
+/// state ∈ disabled | checking | up_to_date | downloading | staged | manual | installing | error
+/// （manual：Linux 非 AppImage 安装，只能手动下载新包，前端不给安装入口）
 fn emit_update_status(
     app: &tauri::AppHandle,
     state: &str,
@@ -880,6 +882,18 @@ async fn check_for_updates(app: &tauri::AppHandle, announce_result: bool) {
         }
     };
     let version = update.version.clone();
+    // Linux 上只有 AppImage 运行态能自我替换：deb 由包管理器安装，进程无权改写自身，
+    // 检查结果一样展示，但不下载、不暂存，等用户手动升级
+    if update_is_manual() {
+        let body = format!(
+            "发现新版本 v{version}（当前为 deb 安装，无法自动替换），请到 GitHub Releases 下载新安装包"
+        );
+        emit_update_status(app, "manual", Some(&version), Some(&body));
+        if announce_result {
+            show_notification(app, "⬆️ AMAX Dashboard 有新版本", &body);
+        }
+        return;
+    }
     log::info!("发现新版本 v{version}，开始后台下载并验签");
     emit_update_status(app, "downloading", Some(&version), None);
     let bytes = match update
@@ -961,22 +975,61 @@ fn update_install_is_idle(app: &tauri::AppHandle) -> bool {
     state.refresh_lock.try_lock().is_ok()
 }
 
+/// 更新是否只能手动安装：Linux 上仅 AppImage 运行态能自我替换，
+/// deb 由包管理器安装、进程无权限改写自身，检查照做但只提示手动下载。
+#[cfg(target_os = "linux")]
+fn update_is_manual() -> bool {
+    std::env::var_os("APPIMAGE").is_none()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn update_is_manual() -> bool {
+    false
+}
+
+/// AppImage 更新完成后的重启：插件替换完文件即返回，不负责重启；直接重跑当前进程
+/// 会落回旧 AppImage 的挂载点（仍是旧版本），必须从 APPIMAGE 路径拉起新包。
+/// 本进程退出到单实例插件释放 DBus 名字之间有时间差，延后一拍启动躲开
+/// 「新实例把激活转发给旧实例后自行退出」的竞态。
+#[cfg(target_os = "linux")]
+fn relaunch_after_appimage_install(app: &tauri::AppHandle) -> Result<(), String> {
+    let path = std::env::var("APPIMAGE")
+        .map_err(|_| "缺少 APPIMAGE 环境变量，无法重启到新版本".to_string())?;
+    std::process::Command::new("sh")
+        .args(["-c", "sleep 2; exec \"$1\"", "sh", &path])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("启动新版本失败: {error}"))?;
+    app.exit(0);
+    Ok(())
+}
+
 /// 安装暂存的更新。成功时不会返回：Windows 的 install() 起好 msiexec 就结束了本进程，
-/// 由 MSI 的 AUTOLAUNCHAPP 拉起新版本。返回 Err 只表示「没能开始安装」，应用继续以旧版运行。
+/// 由 MSI 的 AUTOLAUNCHAPP 拉起新版本；Linux AppImage 的 install() 替换文件后返回，
+/// 由 [`relaunch_after_appimage_install`] 拉起新实例。返回 Err 只表示「没能开始安装」，
+/// 应用继续以旧版运行。
 fn install_staged(app: &tauri::AppHandle, staged: StagedUpdate) -> Result<(), String> {
     let StagedUpdate { update, bytes } = staged;
     let version = update.version.clone();
     emit_update_status(app, "installing", Some(&version), None);
     log::info!("开始安装 v{version}");
-    let result = update
-        .install(bytes)
-        .map_err(|error| format!("安装 v{version} 失败: {error}"));
-    if let Err(message) = &result {
-        log::error!("{message}");
-        emit_update_status(app, "error", Some(&version), Some(message));
-        show_notification(app, "⚠️ AMAX Dashboard 更新失败", message);
+    match update.install(bytes) {
+        Ok(()) => {
+            #[cfg(target_os = "linux")]
+            if let Err(message) = relaunch_after_appimage_install(app) {
+                update_failed(app, &message, true);
+                return Err(message);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let message = format!("安装 v{version} 失败: {error}");
+            update_failed(app, &message, true);
+            Err(message)
+        }
     }
-    result
 }
 
 /// 空闲安装监视器：更新已下载好的那刻起就等着，一旦满足 [`update_install_is_idle`] 就装。

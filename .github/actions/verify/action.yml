@@ -4,15 +4,24 @@
 # 永远一致：两处各写一份命令列表迟早会漂，漂的结果就是测试已经挂了、标签照样发版。
 # 要增删检查项只改这里。
 #
-# 注意：调用方的 runner 必须是 windows-latest。crate 直接依赖 windows-sys / DPAPI，
-# 非 Windows 构建下 crypto 的 encrypt/decrypt 一律返回 Err（不提供明文降级），
-# 只有 Windows 能真正跑到加解密路径；tauri 在 Linux 另需 webkit2gtk 系统包。
+# 双平台：凭据加密两端都有真实实现（Windows DPAPI / Linux AES-256-GCM），
+# 加解密与库迁移测试在两端都跑得到真实路径；Linux runner 需先装 webkit2gtk 等
+# 系统包（tauri/gtk 的 pkg-config 依赖），见下方首个步骤。调用方 runner：
+# Windows 用 windows-latest，Linux 固定 ubuntu-22.04——发布产物以 22.04 的 glibc
+# 为兼容下限，24.04 上编译的二进制在 22.04 用户机器上跑不起来。
 name: Verify desktop
 description: cargo fmt / clippy -D warnings / test，加前端语法检查与逻辑回归
 
 runs:
   using: composite
   steps:
+    - name: Install Linux system dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+
     - name: Setup Rust (stable)
       uses: dtolnay/rust-toolchain@stable
       with:

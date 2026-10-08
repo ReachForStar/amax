@@ -2,6 +2,8 @@ target/
 .qmd/
 tmp/
 .claude/
+# Qoder 本地 MCP 配置（含本机绝对路径，不入库）
+.qoder/
 
 # HarmonyOS
 harmony/**/build/

@@ -4,7 +4,7 @@
 //! 一律由 `lib.rs::run_alerts` 记账，所以增减渠道不会动到判定逻辑，理由同 `alert.rs`
 //! 把规则做成纯函数：能单独测的那部分才守得住。
 //!
-//! 凭据口径：只有 SMTP 授权码算凭据（`db.rs` 里以 `dpapi:v1:` 加密存取，视图只给「是否已配」）；
+//! 凭据口径：只有 SMTP 授权码算凭据（`db.rs` 里以平台密文前缀加密存取，视图只给「是否已配」）；
 //! MeoW 昵称按明文配置对待，与 SMTP 主机/账号同级，界面原样回显。本模块拿到的永远是明文，因此
 //! - 授权码相关的错误串必须先过 `redact` 再回前端或落日志；
 //! - `Debug` 手写而不是 derive，避免一次 `{:?}` 就把授权码打进日志。
@@ -187,7 +187,7 @@ pub struct DeliveryConfig {
     pub smtp: SmtpStored,
     /// 已解密可用的授权码；解不开时为 None 且键名进 `undecryptable`
     pub mail_auth_code: Option<String>,
-    /// 存过但本机解不开（换机器或换 Windows 用户后的旧密文），配置键名
+    /// 存过但本机解不开（换机器或换用户后的旧密文），配置键名
     pub undecryptable: Vec<String>,
     /// 配了但读不出来的脏字段，只用于展示与日志
     pub problems: Vec<String>,
@@ -283,7 +283,7 @@ impl DeliveryConfig {
                     .iter()
                     .any(|stored| stored == "smtp_auth_code")
                 {
-                    "凭据无法解密（换过机器或 Windows 用户），请重新填写".to_string()
+                    "凭据无法解密（换过机器或用户），请重新填写".to_string()
                 } else {
                     "邮件配置不完整（主机、账号、授权码、收件地址）".to_string()
                 },

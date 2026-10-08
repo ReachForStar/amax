@@ -1,9 +1,9 @@
 ---
 title: 桌面安装包与前端资源
 type: entity
-tags: [Tauri, Windows, MSI, 发布]
+tags: [Tauri, Windows, Linux, MSI, deb, AppImage, 发布]
 created: 2026-09-29
-updated: 2026-09-29
+updated: 2026-10-08
 status: active
 ---
 
@@ -11,18 +11,23 @@ status: active
 
 ## 职责
 
-桌面端由 Tauri 打包，`src-tauri/tauri.conf.json` 的 `build.frontendDist` 指向仓库根目录的 `dist/`，MSI 从当前源码和静态前端生成。
+桌面端由 Tauri 打包，`src-tauri/tauri.conf.json` 的 `build.frontendDist` 指向仓库根目录的 `dist/`，安装包从当前源码和静态前端生成。Windows 出 MSI（WiX 含 zh-CN / en-US），Linux 出 deb + AppImage（`src-tauri/tauri.linux.conf.json` 覆盖层切换打包目标）。
 
 ## 关键文件与接口
 
-- `src-tauri/tauri.conf.json`：应用版本、前端目录和 MSI 配置。
-- `src-tauri/Cargo.toml`：Rust crate 版本。
+- `src-tauri/tauri.conf.json`：应用版本、前端目录、CSP、Windows MSI 配置与更新公钥。
+- `src-tauri/tauri.linux.conf.json`：Linux 平台覆盖层（只覆盖 `bundle.targets: ["deb","appimage"]`，构建时自动合并）。
+- `src-tauri/Cargo.toml`：Rust crate 版本；`ring` 供 Linux 凭据加密，`windows-sys` 仅在 `cfg(windows)` 依赖段。
 - `dist/index.html`：设置页的告警规则和通知渠道区域。
-- `.github/workflows/release.yml`：标签版本检查和发布构建。
+- `.github/actions/verify/action.yml`：唯一的检查命令列表（双平台调用）。
+- `.github/workflows/release.yml`：`guard` → `build-windows` + `build-linux` → `publish` 四作业；清单由 `scripts/generate-updater-manifest.mjs` 生成，Release Notes 由 `scripts/release-notes.mjs` 提取。
+- `scripts/verify-desktop-bundle.ps1` / `scripts/verify-desktop-bundle.sh`：Windows / Linux 安装包核验（版本、功能标记、tag 构建的更新签名）。
 
 ## 上下游依赖
 
 桌面设置页的告警入口在看板右上角“设置”内；`dist/index.html` 的告警规则区域位于凭据表单之后，需要在设置页向下滚动。前端通过 Tauri IPC 调用 `get_alert_settings`、`set_alert_settings` 等后端命令。
+
+凭据存储两平台各一套：Windows `dpapi:v1:`（DPAPI），Linux `aes:v1:`（本机密钥文件 + AES-256-GCM），见 [Linux 凭据加密](../decisions/linux-credential-storage.md)。Linux 更新通道见 [Linux 发布产物与更新通道](../decisions/linux-release-and-update.md)。
 
 ## 重要变更记录
 
@@ -35,3 +40,5 @@ status: active
 - 2026-09-29：发布前核对 `master` 的本地与远端提交同为 `19660bd`，应用与 crate 版本均为 0.2.6；远端配置了 `TAURI_SIGNING_PRIVATE_KEY`，发布前尚无 `v0.2.6` 标签。当前网络直连 GitHub 超时，代理 `127.0.0.1:7890` 可连接 GitHub API，发布命令需显式使用该代理。
 - 2026-09-29：已推送 `v0.2.6` 注记标签，远端标签指向 `19660bd`；GitHub Release 工作流 `36547050572` 已启动。
 - 2026-09-29：`v0.2.6` 的 Release 工作流 `36547050572` 成功。公开 Release 含中英文 MSI、各自的 `.sig` 及 `latest.json`；工作流通过产物内容、签名与更新清单一致性、匿名访问校验。独立读取 `releases/latest/download/latest.json` 得到版本 0.2.6，下载 URL 指向本次中文版 MSI。
+- 2026-10-08：开发机迁到 Ubuntu 22.04，完成 Linux 完整适配：桌面代码（`crypto.rs`/`db.rs`/`lib.rs`/`Cargo.toml`/`dist/app.js`）、双平台 CI 与发布链路（`release.yml` 四作业、`action.yml` Linux 依赖步骤、`test.yml` 双平台）、三个发布脚本与 `tauri.linux.conf.json`。产物名与 Windows 同规则：磁盘名空格改点后上传（deb 形如 `AMAX.Dashboard_0.2.6_amd64.deb`，更新包为 AppImage 的 `.AppImage.tar.gz` + `.sig`）。本地构建验证待装系统依赖后进行；`cargo fmt` / 前端 66 条回归 / 脚本语法均已通过。
+- 2026-10-08：仓库索引为 LF，但工作区残留 Windows 时期的 CRLF 文件；Linux 上无 autocrlf 时这些文件被 git 显示为「全文件改动」。已把工作区归一为 LF（与索引一致，无内容变化），避免提交时把整文件行尾重写带进历史。

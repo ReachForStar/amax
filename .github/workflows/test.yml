@@ -1,11 +1,14 @@
-# Test 工作流：push 到 master、PR、手动触发时跑全部自动化检查。
+# Test 工作流：push 到 master、PR、手动触发时在 Windows 与 Linux 上跑全部自动化检查。
 #
 # 说明：
-# - 只在 windows-latest 上跑，理由见 .github/actions/verify/action.yml 头部注释。
-# - 私有仓库的 Windows 分钟数按 Linux 的 2 倍计费，故限制触发面：
+# - 两个平台各跑一份 .github/actions/verify（Linux 侧的系统依赖由 action 内部安装），
+#   加解密与库迁移都有平台专属路径：DPAPI（Windows）与 AES-256-GCM（Linux），
+#   单平台跑会漏掉另一侧的真实实现。
+# - 私有仓库的 Windows 分钟数按 2 倍计费，故限制触发面：
 #   仅 master 与 PR，且用 paths-ignore 跳过纯文档 / 纯鸿蒙改动
 #   （鸿蒙端不在这里测——hvigor / DevEco 工具链装不上 GitHub 托管 runner，
 #   本地用 hvigorw test，见 harmony/README.md）。
+# - Linux 固定 ubuntu-22.04：与发布构建同一兼容下限，避免两边环境漂移。
 # - concurrency 取消同分支上的旧任务，避免连推几次把分钟数烧在过期提交上。
 name: Test
 
@@ -31,9 +34,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  verify-windows:
     name: Verify (Windows)
     runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run checks
+        uses: ./.github/actions/verify
+
+  verify-linux:
+    name: Verify (Linux)
+    runs-on: ubuntu-22.04
     steps:
       - name: Checkout
         uses: actions/checkout@v4

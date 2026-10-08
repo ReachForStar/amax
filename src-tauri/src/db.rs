@@ -5,7 +5,13 @@ use crate::error::AppError;
 use chrono::{Local, NaiveDate};
 use rusqlite::{Connection, params};
 
+/// 本平台新写入密文的前缀。读取侧两种前缀都识别：另一平台写的密文本机解不开，
+/// 会按「配过但本机解不开」提示重填，不会被误当明文凭据
+#[cfg(windows)]
 const ENCRYPTED_PREFIX: &str = "dpapi:v1:";
+#[cfg(not(windows))]
+const ENCRYPTED_PREFIX: &str = "aes:v1:";
+const ENCRYPTED_PREFIXES: [&str; 2] = ["dpapi:v1:", "aes:v1:"];
 /// 服务端下发的 Cookie 到期时间（本地时区 RFC3339）。非机密，明文存；
 /// 仅用于展示，不参与任何失效判定（失效由服务端返回 401/403 决定）
 const KEY_COOKIE_EXPIRES_AT: &str = "cookie_expires_at";
@@ -33,7 +39,7 @@ const KEY_SMTP_USER: &str = "smtp_user";
 const KEY_SMTP_AUTH_CODE: &str = "smtp_auth_code";
 const KEY_SMTP_TO: &str = "smtp_to";
 
-/// 读取加密配置的结果。必须区分「没配过」与「配过但本机解不开」（换机器或换 Windows 用户），
+/// 读取加密配置的结果。必须区分「没配过」与「配过但本机解不开」（换机器或换用户），
 /// 后者要让用户看到需要重填，不能静默当成没配。
 pub enum Secret {
     Absent,
@@ -43,6 +49,8 @@ pub enum Secret {
 
 pub struct Db {
     conn: Connection,
+    /// 加密密钥文件目录（crypto 在 Linux 侧据此读写密钥）
+    key_dir: std::path::PathBuf,
 }
 
 impl Db {
@@ -86,7 +94,18 @@ impl Db {
                 ON alert_delivery(day);",
         )?;
         Self::migrate_schema(&conn)?;
-        Ok(Self { conn })
+        // 密钥文件与库同目录；`:memory:` 等无父目录的路径（测试）退到进程专属临时目录，
+        // 生产路径来自 app_data_dir，恒为绝对路径
+        let key_dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            _ => {
+                let dir =
+                    std::env::temp_dir().join(format!("amax-dashboard-{}", std::process::id()));
+                std::fs::create_dir_all(&dir)?;
+                dir
+            }
+        };
+        Ok(Self { conn, key_dir })
     }
 
     /// 旧库迁移：补齐 request_count / day 列并回填；幂等，新旧表均可安全执行。
@@ -127,17 +146,21 @@ impl Db {
         rows.next()?.map(|row| row.get(0)).transpose()
     }
 
-    fn encrypt_secret(value: &str) -> Result<String, AppError> {
-        crypto::encrypt(value.as_bytes())
+    fn encrypt_secret(key_dir: &std::path::Path, value: &str) -> Result<String, AppError> {
+        crypto::encrypt(key_dir, value.as_bytes())
             .map(|encrypted| format!("{ENCRYPTED_PREFIX}{encrypted}"))
             .map_err(|error| AppError::storage(format!("凭据加密失败: {error}")))
     }
 
-    fn decrypt_secret(raw: String) -> Option<String> {
-        let Some(encrypted) = raw.strip_prefix(ENCRYPTED_PREFIX) else {
+    fn decrypt_secret(key_dir: &std::path::Path, raw: String) -> Option<String> {
+        let Some(encrypted) = ENCRYPTED_PREFIXES
+            .iter()
+            .find_map(|prefix| raw.strip_prefix(prefix))
+        else {
+            // 旧明文记录
             return Some(raw);
         };
-        crypto::decrypt(encrypted)
+        crypto::decrypt(key_dir, encrypted)
             .ok()
             .and_then(|bytes| String::from_utf8(bytes).ok())
     }
@@ -151,10 +174,10 @@ impl Db {
         expires_at: Option<&str>,
     ) -> Result<(), AppError> {
         let encrypted_cookie = (!cookie.is_empty())
-            .then(|| Self::encrypt_secret(cookie))
+            .then(|| Self::encrypt_secret(&self.key_dir, cookie))
             .transpose()?;
         let encrypted_api_key = (!api_key.is_empty())
-            .then(|| Self::encrypt_secret(api_key))
+            .then(|| Self::encrypt_secret(&self.key_dir, api_key))
             .transpose()?;
 
         if encrypted_cookie.is_none() && encrypted_api_key.is_none() {
@@ -192,7 +215,7 @@ impl Db {
     }
 
     pub fn get_cookie(&self) -> Option<String> {
-        Self::decrypt_secret(self.get_raw("cookie").ok()??)
+        Self::decrypt_secret(&self.key_dir, self.get_raw("cookie").ok()??)
     }
 
     pub fn has_cookie(&self) -> bool {
@@ -207,7 +230,7 @@ impl Db {
     }
 
     pub fn get_api_key(&self) -> Option<String> {
-        Self::decrypt_secret(self.get_raw("api_key").ok()??)
+        Self::decrypt_secret(&self.key_dir, self.get_raw("api_key").ok()??)
     }
 
     pub fn has_api_key(&self) -> bool {
@@ -454,11 +477,14 @@ impl Db {
         if raw.is_empty() {
             return Ok(Secret::Absent);
         }
-        if !raw.starts_with(ENCRYPTED_PREFIX) {
+        if !ENCRYPTED_PREFIXES
+            .iter()
+            .any(|prefix| raw.starts_with(prefix))
+        {
             // 旧明文记录（同 cookie/api_key 的兼容口径）
             return Ok(Secret::Value(raw));
         }
-        Ok(match Self::decrypt_secret(raw.clone()) {
+        Ok(match Self::decrypt_secret(&self.key_dir, raw.clone()) {
             Some(value) if value.is_empty() => Secret::Absent,
             Some(value) => Secret::Value(value),
             None => Secret::Undecryptable,
@@ -466,7 +492,7 @@ impl Db {
     }
 
     fn set_secret(&self, key: &str, value: &str) -> Result<(), AppError> {
-        self.set_config_text(key, &Self::encrypt_secret(value)?)
+        self.set_config_text(key, &Self::encrypt_secret(&self.key_dir, value)?)
     }
 
     fn clear_config(&self, key: &str) -> Result<(), AppError> {
@@ -494,8 +520,9 @@ impl Db {
             ..DeliveryConfig::default()
         };
 
-        // 昵称是明文配置，但旧库里可能还留着它当凭据时写下的 `dpapi:v1:` 密文：`get_secret`
-        // 两种都读得出来，下次保存自然落成明文。解不开就按没填处理——它不是凭据，不值一条提示。
+        // 昵称是明文配置，但旧库里可能还留着它当凭据时写下的密文（dpapi:v1:/aes:v1:）：
+        // `get_secret` 明文与密文都读得出来，下次保存自然落成明文。
+        // 解不开就按没填处理——它不是凭据，不值一条提示。
         if let Secret::Value(value) = self.get_secret(KEY_MEOW_NICKNAME)? {
             config.meow_nickname = Some(value);
         }
@@ -802,22 +829,43 @@ mod tests {
         assert!(exists, "day 列索引应存在");
     }
 
+    fn test_key_dir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("amax-db-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("建测试密钥目录应成功");
+        dir
+    }
+
     #[test]
     fn decrypt_secret_reads_legacy_plaintext() {
         let value = "session=legacy-cookie".to_string();
-        assert_eq!(Db::decrypt_secret(value.clone()), Some(value));
+        assert_eq!(
+            Db::decrypt_secret(&test_key_dir(), value.clone()),
+            Some(value)
+        );
     }
 
     #[test]
     fn encrypt_secret_round_trips() {
+        let dir = test_key_dir();
         let value = "session=encrypted-cookie";
-        let encrypted = Db::encrypt_secret(value).expect("加密应成功");
-        assert_eq!(Db::decrypt_secret(encrypted).as_deref(), Some(value));
+        let encrypted = Db::encrypt_secret(&dir, value).expect("加密应成功");
+        assert!(
+            encrypted.starts_with(ENCRYPTED_PREFIX),
+            "写入应带本平台前缀"
+        );
+        assert_eq!(Db::decrypt_secret(&dir, encrypted).as_deref(), Some(value));
     }
 
     #[test]
     fn decrypt_secret_rejects_invalid_encrypted_value() {
-        assert_eq!(Db::decrypt_secret("dpapi:v1:invalid".to_string()), None);
+        assert_eq!(
+            Db::decrypt_secret(&test_key_dir(), "dpapi:v1:invalid".to_string()),
+            None
+        );
+        assert_eq!(
+            Db::decrypt_secret(&test_key_dir(), "aes:v1:00".to_string()),
+            None
+        );
     }
 
     fn db_with_config(cookie: &str, api_key: &str, expires: Option<&str>) -> Db {

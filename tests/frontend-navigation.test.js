@@ -819,6 +819,22 @@ test('非就绪状态不应出现立即安装入口', async () => {
   assert.equal(app.elements['apply-update-btn'].classList.contains('hidden'), true);
 });
 
+test('Linux deb 手动升级状态应展示后端文案且不给立即安装入口', async () => {
+  const app = createHarness();
+  await app.flush();
+  await app.elements['settings-btn'].dispatch('click');
+  await app.flush();
+
+  app.emitEvent('update://status', {
+    state: 'manual', version: '0.3.0', message: '发现新版本 v0.3.0（当前为 deb 安装，无法自动替换），请到 GitHub Releases 下载新安装包',
+  });
+  await app.flush();
+
+  assert.equal(app.elements['update-status'].classList.contains('hidden'), false);
+  assert.match(app.elements['update-status'].textContent, /deb 安装/);
+  assert.equal(app.elements['apply-update-btn'].classList.contains('hidden'), true);
+});
+
 test('点击立即安装应调用 apply_update_now，失败时撤下入口', async () => {
   const app = createHarness({ applyUpdateError: { code: 'storage', message: '安装 v0.3.0 失败: msiexec 拒绝' } });
   await app.flush();
