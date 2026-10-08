@@ -156,6 +156,13 @@ fn aead_key(key: &[u8; KEY_LEN]) -> Result<UnboundKey, String> {
 /// 解密路径也走这里：密钥文件意外丢失时按「解不开」上报，同时补一把新密钥供后续写入。
 #[cfg(unix)]
 fn load_or_create_key(dir: &Path) -> Result<[u8; KEY_LEN], String> {
+    // 同进程多线程可能并发加解密（并行测试、保存配置与后台刷新），
+    // 串行化读取与创建，避免读到另一线程刚 create、尚未写入完成的空密钥文件
+    static KEY_ACCESS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _guard = KEY_ACCESS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     let path = dir.join(KEY_FILE_NAME);
     match std::fs::read(&path) {
         Ok(bytes) => key_from_bytes(&bytes),
